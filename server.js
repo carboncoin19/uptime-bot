@@ -5,19 +5,19 @@ import fs from "fs";
 import FormData from "form-data";
 
 // ================= CONFIG =================
-const PORT = 3000;
-const TG_BOT_TOKEN = "8121825517:AAH_w_W0wwjM8dHUbEatNbmXsW26F6MCOCo";
+const PORT = process.env.PORT || 3000;
+const TG_BOT_TOKEN = process.env.TG_BOT_TOKEN; // SET IN RAILWAY
 const DB_FILE = "/data/uptime.db";
 const POLL_INTERVAL = 5000;
 
 // ---- ADMIN ACCESS ----
 const ADMIN_CHAT_IDS = [
-  1621660251
+  1621660251 // 👈 YOUR TELEGRAM CHAT ID
 ];
 
 // ---- OFFLINE ESCALATION ----
-const OFFLINE_ALERT_MIN_1 = 1;
-const OFFLINE_ALERT_MIN_2 = 2;
+const OFFLINE_ALERT_MIN_1 = 1; // text alert
+const OFFLINE_ALERT_MIN_2 = 2; // voice alert
 
 let lastUpdateId = 0;
 // =========================================
@@ -36,7 +36,7 @@ app.use(express.json());
 
 // ---------- DATABASE ----------
 const db = new sqlite3.Database(DB_FILE, () => {
-  console.log("✅ SQLite database ready");
+  console.log("✅ SQLite database ready at", DB_FILE);
 });
 
 db.serialize(() => {
@@ -61,7 +61,9 @@ db.serialize(() => {
 
 // ---------- TELEGRAM SEND ----------
 async function sendTelegram(chatId, text) {
+  if (!TG_BOT_TOKEN) return;
   const url = `https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage`;
+
   try {
     await fetch(url, {
       method: "POST",
@@ -76,6 +78,11 @@ async function sendTelegram(chatId, text) {
 
 // ---------- TELEGRAM VOICE ----------
 async function sendVoice(chatId) {
+  if (!fs.existsSync("./offline_warning.ogg")) {
+    console.warn("⚠️ offline_warning.ogg not found");
+    return;
+  }
+
   const url = `https://api.telegram.org/bot${TG_BOT_TOKEN}/sendVoice`;
   const form = new FormData();
   form.append("chat_id", chatId);
@@ -172,7 +179,7 @@ function querySummary(days) {
   return new Promise((resolve) => {
     db.get(
       `
-      SELECT COUNT(*) AS events, AVG(day_pct) AS avg_pct
+      SELECT AVG(day_pct) AS avg_pct
       FROM events
       WHERE created_at >= datetime('now', ?)
       `,
@@ -257,25 +264,24 @@ setInterval(() => {
 }, 30000);
 
 
-// ---------- AUTO SUMMARY SCHEDULER ----------
+// ---------- AUTO SUMMARY (7AM WAT) ----------
 async function autoSummaries() {
   const now = new Date(Date.now() + 3600000); // UTC+1
   const h = now.getHours();
   const m = now.getMinutes();
-  const d = now.getDay();
+  const day = now.getDay();
   const date = now.getDate();
   const today = now.toISOString().split("T")[0];
 
-  if (h !== 7 || m !== 0) return;
+  if (h !== 7 || m > 1) return;
 
   if (lastDailySent !== today) {
     const s = await querySummary(1);
-    const dwn = await calculateDowntime(1);
     broadcastText(`📊 DAILY SUMMARY\nAvg uptime: ${s.avg_pct?.toFixed(2) || 0}%`);
     lastDailySent = today;
   }
 
-  if (d === 1 && lastWeeklySent !== today) {
+  if (day === 1 && lastWeeklySent !== today) {
     const s = await querySummary(7);
     broadcastText(`📊 WEEKLY SUMMARY\nAvg uptime: ${s.avg_pct?.toFixed(2) || 0}%`);
     lastWeeklySent = today;
@@ -292,9 +298,10 @@ setInterval(autoSummaries, 60000);
 
 
 // ---------- ESP32 EVENT API ----------
-app.post("/api/event", async (req, res) => {
+app.post("/api/event", (req, res) => {
   const { device, event, time, day_pct } = req.body;
-  if (!device || !event || !time) return res.status(400).json({ error: "Invalid payload" });
+  if (!device || !event || !time)
+    return res.status(400).json({ error: "Invalid payload" });
 
   db.run(
     `INSERT INTO events (device, event, time, day_pct) VALUES (?, ?, ?, ?)`,
@@ -323,6 +330,5 @@ app.get("/", (_, res) => res.send("ESP32 uptime server running"));
 
 // ---------- START ----------
 app.listen(PORT, "0.0.0.0", () => {
-  console.log(`🚀 Server listening on http://0.0.0.0:${PORT}`);
+  console.log(`🚀 Server listening on port ${PORT}`);
 });
-
