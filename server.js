@@ -7,7 +7,7 @@ import FormData from "form-data";
 // ================= CONFIG =================
 const PORT = 3000;
 const TG_BOT_TOKEN = "8121825517:AAH_w_W0wwjM8dHUbEatNbmXsW26F6MCOCo";
-const DB_FILE = "./uptime.db";
+const DB_FILE = "/data/uptime.db";
 const POLL_INTERVAL = 5000;
 
 // ---- ADMIN ACCESS ----
@@ -325,3 +325,4 @@ app.get("/", (_, res) => res.send("ESP32 uptime server running"));
 app.listen(PORT, "0.0.0.0", () => {
   console.log(`🚀 Server listening on http://0.0.0.0:${PORT}`);
 });
+
