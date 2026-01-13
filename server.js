@@ -6,8 +6,12 @@ import fetch from "node-fetch";
 const PORT = process.env.PORT || 8080;
 const TG_BOT_TOKEN = process.env.TG_BOT_TOKEN;
 const DB_FILE = "/data/uptime.db";
+
 const POLL_INTERVAL = 5000;
 const DEVICE_TIMEOUT_MS = 2 * 60 * 1000;
+
+// Nigeria (WAT)
+const TZ_OFFSET_MS = 1 * 60 * 60 * 1000;
 
 const ADMIN_CHAT_IDS = [1621660251];
 /* ========================================= */
@@ -35,10 +39,12 @@ db.serialize(() => {
       day_pct REAL,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )`);
+
   db.run(`
     CREATE TABLE IF NOT EXISTS chats (
       chat_id INTEGER PRIMARY KEY
     )`);
+
   db.run(`
     CREATE TABLE IF NOT EXISTS devices (
       device TEXT PRIMARY KEY,
@@ -50,10 +56,35 @@ db.serialize(() => {
 /* ---------- TELEGRAM ---------- */
 async function sendTelegram(chatId, text) {
   if (!TG_BOT_TOKEN) return;
+
   await fetch(`https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ chat_id: chatId, text })
+  }).catch(() => {});
+}
+
+async function sendTelegramMenu(chatId, text) {
+  if (!TG_BOT_TOKEN) return;
+
+  const keyboard = {
+    keyboard: [
+      [{ text: "📊 Status (24h)" }, { text: "📈 Status (7 days)" }],
+      [{ text: "📉 Status (30 days)" }],
+      [{ text: "♻️ Reset (Admin)" }]
+    ],
+    resize_keyboard: true,
+    one_time_keyboard: false
+  };
+
+  await fetch(`https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      chat_id: chatId,
+      text,
+      reply_markup: keyboard
+    })
   }).catch(() => {});
 }
 
@@ -69,7 +100,81 @@ async function resetUptimeData(chatId) {
   db.run(`DELETE FROM devices`);
   currentDeviceStatus = "UNKNOWN";
   offlineSince = null;
+
   await sendTelegram(chatId, "♻️ RESET COMPLETE\nWaiting for device sync…");
+}
+
+/* ---------- DOWNTIME ---------- */
+function calculateDowntime(days) {
+  return new Promise(resolve => {
+    db.all(
+      `
+      SELECT event, created_at
+      FROM events
+      WHERE created_at >= datetime('now', ?)
+      ORDER BY created_at ASC
+      `,
+      [`-${days} days`],
+      (_, rows) => {
+        let downMs = 0;
+        let count = 0;
+        let lastOffline = null;
+
+        for (const r of rows) {
+          const t = new Date(r.created_at).getTime();
+          if (r.event === "OFFLINE") {
+            count++;
+            lastOffline = t;
+          }
+          if (r.event === "ONLINE" && lastOffline) {
+            downMs += t - lastOffline;
+            lastOffline = null;
+          }
+        }
+
+        if (lastOffline && currentDeviceStatus === "OFFLINE") {
+          downMs += Date.now() - lastOffline;
+        }
+
+        resolve({
+          offlineCount: count,
+          hours: Math.floor(downMs / 3600000),
+          minutes: Math.floor((downMs % 3600000) / 60000)
+        });
+      }
+    );
+  });
+}
+
+/* ---------- SUMMARY ---------- */
+function querySummary(days) {
+  return new Promise(resolve => {
+    db.get(
+      `SELECT AVG(day_pct) AS avg_pct FROM events
+       WHERE created_at >= datetime('now', ?)`,
+      [`-${days} days`],
+      (_, row) => resolve(row || {})
+    );
+  });
+}
+
+async function sendStatus(chatId, days, title) {
+  const s = await querySummary(days);
+  const d = await calculateDowntime(days);
+
+  const emoji =
+    currentDeviceStatus === "ONLINE" ? "🟢 ONLINE" :
+    currentDeviceStatus === "OFFLINE" ? "🔴 OFFLINE" :
+    "⚪ UNKNOWN";
+
+  await sendTelegram(
+    chatId,
+    `📊 ${title}\n\n` +
+    `Status: ${emoji}\n` +
+    `Avg uptime: ${s.avg_pct?.toFixed(2) || 0}%\n` +
+    `Offline count: ${d.offlineCount}\n` +
+    `Downtime: ${d.hours}h ${d.minutes}m`
+  );
 }
 
 /* ---------- TELEGRAM POLLING ---------- */
@@ -85,11 +190,24 @@ setInterval(async () => {
     if (!u.message?.text) continue;
 
     const chatId = u.message.chat.id;
+    const text = u.message.text.toLowerCase();
+
     db.run(`INSERT OR IGNORE INTO chats VALUES (?)`, [chatId]);
 
-    const cmd = u.message.text.replace("/", "").toLowerCase();
-    if (cmd === "reset" && ADMIN_CHAT_IDS.includes(chatId)) {
-      resetUptimeData(chatId);
+    if (text === "/start" || text === "menu") {
+      await sendTelegramMenu(chatId, "📡 ESP32 Uptime Monitor\nChoose an option:");
+      continue;
+    }
+
+    if (text.includes("24")) await sendStatus(chatId, 1, "24 HOUR STATUS");
+    else if (text.includes("7")) await sendStatus(chatId, 7, "7 DAY STATUS");
+    else if (text.includes("30")) await sendStatus(chatId, 30, "30 DAY STATUS");
+    else if (text.includes("reset")) {
+      if (!ADMIN_CHAT_IDS.includes(chatId)) {
+        await sendTelegram(chatId, "⛔ Admin only command");
+      } else {
+        await resetUptimeData(chatId);
+      }
     }
   }
 }, POLL_INTERVAL);
@@ -106,6 +224,20 @@ setInterval(() => {
         broadcast(`🚨 ${d.device} unreachable`);
       }
     });
+  });
+}, 60000);
+
+/* ---------- AUTO SUMMARY @ 7AM ---------- */
+setInterval(async () => {
+  const now = new Date(Date.now() + TZ_OFFSET_MS);
+  if (now.getHours() !== 7 || now.getMinutes() !== 0) return;
+
+  db.all(`SELECT chat_id FROM chats`, async (_, rows) => {
+    for (const r of rows) {
+      await sendStatus(r.chat_id, 1, "📊 DAILY SUMMARY");
+      await sendStatus(r.chat_id, 7, "📈 WEEKLY SUMMARY");
+      await sendStatus(r.chat_id, 30, "📉 MONTHLY SUMMARY");
+    }
   });
 }, 60000);
 
