@@ -9,7 +9,7 @@ const DB_FILE = "/data/uptime.db";
 
 const POLL_INTERVAL = 5000;
 const DEVICE_TIMEOUT_MS = 2 * 60 * 1000; // 2 minutes
-const TZ_OFFSET_MS = 3600000; // WAT UTC+1
+const TZ_OFFSET_MS = 3600000; // Nigeria WAT UTC+1
 
 const ADMIN_CHAT_IDS = [1621660251];
 /* ========================================= */
@@ -49,7 +49,7 @@ db.serialize(() => {
   `);
 });
 
-/* ---------- TIME FORMAT (AM / PM) ---------- */
+/* ---------- TIME FORMAT (12H AM/PM) ---------- */
 function formatTimeWAT(ms) {
   return new Date(ms + TZ_OFFSET_MS).toLocaleString("en-US", {
     year: "numeric",
@@ -206,7 +206,7 @@ setInterval(async () => {
   }
 }, POLL_INTERVAL);
 
-/* ---------- DEVICE TIMEOUT (OFFLINE ESCALATION) ---------- */
+/* ---------- DEVICE TIMEOUT ---------- */
 setInterval(() => {
   const now = Date.now();
 
@@ -226,6 +226,29 @@ setInterval(() => {
   });
 }, 60000);
 
+/* ---------- AUTO SUMMARY @ 7:00 AM ---------- */
+let lastSummaryDay = null;
+
+setInterval(() => {
+  const now = Date.now();
+  const t = new Date(now + TZ_OFFSET_MS);
+
+  if (t.getHours() !== 7) return;
+
+  const today = t.toDateString();
+  if (today === lastSummaryDay) return;
+
+  lastSummaryDay = today;
+
+  db.all(`SELECT chat_id FROM chats`, (_, rows) => {
+    rows?.forEach(r => {
+      sendStatus(r.chat_id, 1, "DAILY SUMMARY");
+      sendStatus(r.chat_id, 7, "WEEKLY SUMMARY");
+      sendStatus(r.chat_id, 30, "MONTHLY SUMMARY");
+    });
+  });
+}, 60000);
+
 /* ---------- EVENT API ---------- */
 app.post("/api/event", (req, res) => {
   const { device, event, time, day_pct, state } = req.body;
@@ -233,7 +256,6 @@ app.post("/api/event", (req, res) => {
 
   const now = Date.now();
 
-  // keep device alive
   db.run(
     `
     INSERT INTO devices (device,last_seen,status)
