@@ -2,131 +2,111 @@ import express from "express";
 import sqlite3 from "sqlite3";
 import fetch from "node-fetch";
 
+/* ================= CONFIG ================= */
 const PORT = process.env.PORT || 8080;
 const TG_BOT_TOKEN = process.env.TG_BOT_TOKEN;
 const DB_FILE = "/data/uptime.db";
 const POLL_INTERVAL = 5000;
-const TZ_OFFSET_MS = 3600000;
+const DEVICE_TIMEOUT_MS = 2 * 60 * 1000;
+const TZ_OFFSET_MS = 3600000; // WAT
 const ADMIN_CHAT_IDS = [1621660251];
+/* ========================================= */
 
+let lastUpdateId = 0;
+let currentDeviceStatus = "UNKNOWN";
+
+/* ---------- APP ---------- */
 const app = express();
 app.use(express.json());
 
+/* ---------- DATABASE ---------- */
 const db = new sqlite3.Database(DB_FILE);
 db.serialize(() => {
   db.run(`CREATE TABLE IF NOT EXISTS events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    device TEXT, event TEXT, time TEXT, day_pct REAL,
+    device TEXT, event TEXT, time TEXT,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
   )`);
   db.run(`CREATE TABLE IF NOT EXISTS chats (chat_id INTEGER PRIMARY KEY)`);
   db.run(`CREATE TABLE IF NOT EXISTS devices (
-    device TEXT PRIMARY KEY,
-    last_seen INTEGER,
-    status TEXT
+    device TEXT PRIMARY KEY, last_seen INTEGER, status TEXT
   )`);
 });
 
 /* ---------- TELEGRAM ---------- */
-async function sendTelegram(chatId, text, menu=false) {
+async function sendTelegram(chatId, text) {
   if (!TG_BOT_TOKEN) return;
-  const payload = { chat_id: chatId, text };
-  if (menu) {
-    payload.reply_markup = {
-      keyboard: [
-        ["📊 Status (24h)", "📈 Status (7 days)"],
-        ["📉 Status (30 days)"],
-        ["♻️ Reset (Admin)"]
-      ],
-      resize_keyboard: true
-    };
-  }
   await fetch(`https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage`, {
     method: "POST",
-    headers: {"Content-Type":"application/json"},
-    body: JSON.stringify(payload)
-  }).catch(()=>{});
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ chat_id: chatId, text })
+  }).catch(() => {});
 }
 
-/* ---------- STATUS ---------- */
-function getStatus() {
-  return new Promise(res=>{
-    db.get(`SELECT status FROM devices LIMIT 1`,(_,r)=>{
-      res(r?.status || "UNKNOWN");
-    });
-  });
-}
-
-async function sendStatus(chatId, days, title) {
-  const status = await getStatus();
-  await sendTelegram(chatId,
-    `📊 ${title}\n\nStatus: ${status}`
+function broadcast(text) {
+  db.all(`SELECT chat_id FROM chats`, (_, rows) =>
+    rows?.forEach(r => sendTelegram(r.chat_id, text))
   );
 }
 
+/* ---------- STATUS ---------- */
+async function sendStatus(chatId) {
+  sendTelegram(chatId, `📊 STATUS\nDevice is: ${currentDeviceStatus}`);
+}
+
 /* ---------- TELEGRAM POLLING ---------- */
-let lastUpdateId = 0;
-setInterval(async ()=>{
+setInterval(async () => {
   const r = await fetch(
-    `https://api.telegram.org/bot${TG_BOT_TOKEN}/getUpdates?offset=${lastUpdateId+1}`
-  ).then(r=>r.json()).catch(()=>null);
+    `https://api.telegram.org/bot${TG_BOT_TOKEN}/getUpdates?offset=${lastUpdateId + 1}`
+  ).then(r => r.json()).catch(() => null);
+
   if (!r?.ok) return;
 
   for (const u of r.result) {
     lastUpdateId = u.update_id;
-    const chatId = u.message?.chat.id;
-    const txt = u.message?.text?.toLowerCase() || "";
-    if (!chatId) continue;
+    if (!u.message?.text) continue;
 
-    db.run(`INSERT OR IGNORE INTO chats VALUES (?)`,[chatId]);
+    const chatId = u.message.chat.id;
+    const txt = u.message.text.toLowerCase();
 
-    if (txt==="/start"||txt==="menu")
-      sendTelegram(chatId,"📡 ESP32 Uptime Monitor",true);
-    else if (txt.includes("24"))
-      sendStatus(chatId,1,"24 HOUR STATUS");
-    else if (txt.includes("7"))
-      sendStatus(chatId,7,"7 DAY STATUS");
-    else if (txt.includes("30"))
-      sendStatus(chatId,30,"30 DAY STATUS");
-    else if (txt.includes("reset") && ADMIN_CHAT_IDS.includes(chatId)){
+    db.run(`INSERT OR IGNORE INTO chats VALUES (?)`, [chatId]);
+
+    if (txt === "/status") sendStatus(chatId);
+    if (txt === "/reset" && ADMIN_CHAT_IDS.includes(chatId)) {
       db.run(`DELETE FROM events`);
       db.run(`DELETE FROM devices`);
-      sendTelegram(chatId,"♻️ RESET DONE\nWaiting for device sync…");
+      currentDeviceStatus = "UNKNOWN";
+      sendTelegram(chatId, "♻️ RESET DONE\nWaiting for device sync…");
     }
   }
 }, POLL_INTERVAL);
 
 /* ---------- EVENT API ---------- */
-app.post("/api/event",(req,res)=>{
-  const {device,event,time,state} = req.body;
-  if (!device||!event||!time) return res.status(400).end();
+app.post("/api/event", (req, res) => {
+  const { device, event, time, state } = req.body;
+  if (!device || !event || !time) return res.status(400).end();
 
   const now = Date.now();
 
-  db.run(
-    `INSERT INTO devices (device,last_seen,status)
-     VALUES (?,?,?)
-     ON CONFLICT(device)
-     DO UPDATE SET last_seen=?`,
-    [device,now,"UNKNOWN",now]
-  );
-
-  if (event==="STATE_SYNC") {
-    db.run(
-      `UPDATE devices SET status=?, last_seen=? WHERE device=?`,
-      [state,now,device]
-    );
+  if (event === "STATE_SYNC") {
+    currentDeviceStatus = state;
+    db.run(`INSERT OR REPLACE INTO devices VALUES (?,?,?)`,
+      [device, now, state]);
+    return res.json({ ok: true });
   }
 
-  if (event!=="HEARTBEAT") {
-    db.run(
-      `INSERT INTO events (device,event,time,day_pct)
-       VALUES (?,?,?,0)`,
-      [device,event,time]
-    );
+  if (event === "ONLINE" || event === "OFFLINE") {
+    currentDeviceStatus = event;
+    broadcast(`${event === "ONLINE" ? "🟢" : "🔴"} ${device} ${event}`);
   }
 
-  res.json({ok:true});
+  db.run(`INSERT INTO events (device,event,time) VALUES (?,?,?)`,
+    [device, event, time]);
+
+  res.json({ ok: true });
 });
 
-app.listen(PORT,()=>console.log("🚀 Server running on",PORT));
+/* ---------- START ---------- */
+app.listen(PORT, () =>
+  console.log("🚀 Server running on", PORT)
+);
