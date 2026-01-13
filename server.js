@@ -9,7 +9,7 @@ const DB_FILE = "/data/uptime.db";
 
 const POLL_INTERVAL = 5000;
 const DEVICE_TIMEOUT_MS = 2 * 60 * 1000;
-const TZ_OFFSET_MS = 3600000; // WAT
+const TZ_OFFSET_MS = 3600000; // WAT UTC+1
 
 const ADMIN_CHAT_IDS = [1621660251];
 /* ========================================= */
@@ -27,12 +27,17 @@ const db = new sqlite3.Database(DB_FILE);
 db.serialize(() => {
   db.run(`CREATE TABLE IF NOT EXISTS events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    device TEXT, event TEXT, time TEXT, day_pct REAL,
+    device TEXT,
+    event TEXT,
+    time TEXT,
+    day_pct REAL,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
   )`);
   db.run(`CREATE TABLE IF NOT EXISTS chats (chat_id INTEGER PRIMARY KEY)`);
   db.run(`CREATE TABLE IF NOT EXISTS devices (
-    device TEXT PRIMARY KEY, last_seen INTEGER, status TEXT
+    device TEXT PRIMARY KEY,
+    last_seen INTEGER,
+    status TEXT
   )`);
 });
 
@@ -49,6 +54,7 @@ async function sendTelegram(chatId, text, menu=false) {
       resize_keyboard: true
     };
   }
+
   await fetch(`https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -62,7 +68,7 @@ function broadcast(text) {
   );
 }
 
-/* ---------- SUMMARY ---------- */
+/* ---------- STATUS HELPERS ---------- */
 function calcDowntime(days) {
   return new Promise(res => {
     db.all(
@@ -99,9 +105,9 @@ function avgUptime(days) {
 async function sendStatus(chatId, days, title) {
   const d = await calcDowntime(days);
   const p = await avgUptime(days);
-  const s = currentDeviceStatus;
-  await sendTelegram(chatId,
-    `📊 ${title}\n\nStatus: ${s}\nAvg uptime: ${p.toFixed(2)}%\nOffline count: ${d.cnt}\nDowntime: ${d.h}h ${d.m}m`
+  await sendTelegram(
+    chatId,
+    `📊 ${title}\n\nStatus: ${currentDeviceStatus}\nAvg uptime: ${p.toFixed(2)}%\nOffline count: ${d.cnt}\nDowntime: ${d.h}h ${d.m}m`
   );
 }
 
@@ -110,6 +116,7 @@ setInterval(async () => {
   const r = await fetch(
     `https://api.telegram.org/bot${TG_BOT_TOKEN}/getUpdates?offset=${lastUpdateId+1}`
   ).then(r=>r.json()).catch(()=>null);
+
   if (!r?.ok) return;
 
   for (const u of r.result) {
@@ -117,15 +124,16 @@ setInterval(async () => {
     if (!u.message?.text) continue;
 
     const chatId = u.message.chat.id;
-    const txt = u.message.text.toLowerCase();
+    const txt = u.message.text.toLowerCase().replace("/", "");
 
     db.run(`INSERT OR IGNORE INTO chats VALUES (?)`, [chatId]);
 
-    if (txt === "/start" || txt === "menu") {
-      sendTelegram(chatId, "ESP32 Uptime Monitor", true);
-    } else if (txt.includes("24")) sendStatus(chatId,1,"24 HOUR STATUS");
-    else if (txt.includes("7")) sendStatus(chatId,7,"7 DAY STATUS");
-    else if (txt.includes("30")) sendStatus(chatId,30,"30 DAY STATUS");
+    if (txt === "start" || txt === "menu") {
+      sendTelegram(chatId, "📡 ESP32 Uptime Monitor", true);
+    }
+    else if (txt === "status" || txt.includes("24")) sendStatus(chatId,1,"24 HOUR STATUS");
+    else if (txt === "statusweek" || txt.includes("7")) sendStatus(chatId,7,"7 DAY STATUS");
+    else if (txt === "statusmonth" || txt.includes("30")) sendStatus(chatId,30,"30 DAY STATUS");
     else if (txt.includes("reset")) {
       if (!ADMIN_CHAT_IDS.includes(chatId))
         sendTelegram(chatId,"⛔ Admin only");
@@ -134,7 +142,7 @@ setInterval(async () => {
         db.run(`DELETE FROM devices`);
         currentDeviceStatus="UNKNOWN";
         offlineSince=null;
-        sendTelegram(chatId,"♻️ RESET DONE");
+        sendTelegram(chatId,"♻️ RESET DONE\nWaiting for device sync…");
       }
     }
   }
@@ -146,25 +154,34 @@ app.post("/api/event",(req,res)=>{
   if(!device||!event||!time) return res.status(400).end();
 
   const now=Date.now();
-  db.run(`INSERT INTO devices VALUES (?,?,?)
-    ON CONFLICT(device) DO UPDATE SET last_seen=?,status='ONLINE'`,
-    [device,now,"ONLINE",now]);
+  db.run(
+    `INSERT INTO devices (device,last_seen,status)
+     VALUES (?,?,?)
+     ON CONFLICT(device) DO UPDATE SET last_seen=?,status='ONLINE'`,
+    [device,now,"ONLINE",now]
+  );
 
   if(event==="HEARTBEAT") return res.json({ok:true});
 
   if(event==="SYNC" && uptime_ms){
-    const fakeTime=new Date(Date.now()-uptime_ms).toISOString();
-    db.run(`INSERT INTO events (device,event,time,day_pct)
-            VALUES (?, 'ONLINE', ?, 100)`,
-            [device,fakeTime]);
+    const pct=Math.min(100,(uptime_ms/DAY_MS)*100);
+    db.run(
+      `INSERT INTO events (device,event,time,day_pct)
+       VALUES (?, 'ONLINE', ?, ?)`,
+      [device,new Date().toISOString(),pct]
+    );
     return res.json({ok:true});
   }
 
   if(event==="STATE_SYNC"){
     currentDeviceStatus=state;
     offlineSince=state==="OFFLINE"?now:null;
-    db.run(`INSERT INTO events VALUES (NULL,?,?,?,?,CURRENT_TIMESTAMP)`,
-           [device,state,time,day_pct||0]);
+    db.run(
+      `INSERT INTO events (device,event,time,day_pct)
+       VALUES (?,?,?,?)`,
+      [device,state,time,day_pct||0]
+    );
+    broadcast(`🔄 STATE SYNC\n${device} → ${state}`);
     return res.json({ok:true});
   }
 
@@ -173,8 +190,12 @@ app.post("/api/event",(req,res)=>{
     offlineSince=event==="OFFLINE"?now:null;
   }
 
-  db.run(`INSERT INTO events VALUES (NULL,?,?,?,?,CURRENT_TIMESTAMP)`,
-         [device,event,time,day_pct]);
+  db.run(
+    `INSERT INTO events (device,event,time,day_pct)
+     VALUES (?,?,?,?)`,
+    [device,event,time,day_pct]
+  );
+
   broadcast(`${event==="ONLINE"?"🟢":"🔴"} ${device} ${event}`);
   res.json({ok:true});
 });
@@ -192,4 +213,4 @@ setInterval(()=>{
   });
 },60000);
 
-app.listen(PORT,()=>console.log("🚀 Server running",PORT));
+app.listen(PORT,()=>console.log("🚀 Server running on",PORT));
