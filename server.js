@@ -49,7 +49,7 @@ db.serialize(() => {
   `);
 });
 
-/* ---------- TIME FORMAT (12H AM/PM) ---------- */
+/* ---------- TIME (12H AM/PM) ---------- */
 function formatTimeWAT(ms) {
   return new Date(ms + TZ_OFFSET_MS).toLocaleString("en-US", {
     year: "numeric",
@@ -63,26 +63,13 @@ function formatTimeWAT(ms) {
 }
 
 /* ---------- TELEGRAM ---------- */
-async function sendTelegram(chatId, text, menu = false) {
+async function sendTelegram(chatId, text) {
   if (!TG_BOT_TOKEN) return;
-
-  const payload = { chat_id: chatId, text };
-
-  if (menu) {
-    payload.reply_markup = {
-      keyboard: [
-        ["📊 Status (24h)", "📈 Status (7 days)"],
-        ["📉 Status (30 days)"],
-        ["♻️ Reset (Admin)"]
-      ],
-      resize_keyboard: true
-    };
-  }
 
   await fetch(`https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload)
+    body: JSON.stringify({ chat_id: chatId, text })
   }).catch(() => {});
 }
 
@@ -171,7 +158,7 @@ async function sendStatus(chatId, days, title) {
   );
 }
 
-/* ---------- TELEGRAM POLLING ---------- */
+/* ---------- TELEGRAM COMMANDS ---------- */
 setInterval(async () => {
   const r = await fetch(
     `https://api.telegram.org/bot${TG_BOT_TOKEN}/getUpdates?offset=${lastUpdateId + 1}`
@@ -184,17 +171,34 @@ setInterval(async () => {
     if (!u.message?.text) continue;
 
     const chatId = u.message.chat.id;
-    const txt = u.message.text.toLowerCase();
+    const cmd = u.message.text.trim().toLowerCase();
 
     db.run(`INSERT OR IGNORE INTO chats VALUES (?)`, [chatId]);
 
-    if (txt === "/start" || txt === "menu") {
-      sendTelegram(chatId, "📡 ESP32 Uptime Monitor", true);
+    if (cmd === "/start") {
+      sendTelegram(
+        chatId,
+        "📡 ESP32 Uptime Monitor\n\n" +
+        "Commands:\n" +
+        "/status – 24 hour summary\n" +
+        "/statusweek – 7 day summary\n" +
+        "/statusmonth – 30 day summary"
+      );
     }
-    else if (txt.includes("24")) sendStatus(chatId, 1, "24 HOUR STATUS");
-    else if (txt.includes("7")) sendStatus(chatId, 7, "7 DAY STATUS");
-    else if (txt.includes("30")) sendStatus(chatId, 30, "30 DAY STATUS");
-    else if (txt.includes("reset")) {
+
+    else if (cmd === "/status") {
+      sendStatus(chatId, 1, "24 HOUR STATUS");
+    }
+
+    else if (cmd === "/statusweek") {
+      sendStatus(chatId, 7, "7 DAY STATUS");
+    }
+
+    else if (cmd === "/statusmonth") {
+      sendStatus(chatId, 30, "30 DAY STATUS");
+    }
+
+    else if (cmd === "/reset") {
       if (!ADMIN_CHAT_IDS.includes(chatId)) {
         sendTelegram(chatId, "⛔ Admin only");
       } else {
@@ -206,7 +210,7 @@ setInterval(async () => {
   }
 }, POLL_INTERVAL);
 
-/* ---------- DEVICE TIMEOUT ---------- */
+/* ---------- DEVICE TIMEOUT (OFFLINE ESCALATION) ---------- */
 setInterval(() => {
   const now = Date.now();
 
@@ -226,7 +230,7 @@ setInterval(() => {
   });
 }, 60000);
 
-/* ---------- AUTO SUMMARY @ 7:00 AM ---------- */
+/* ---------- AUTO SUMMARY @ 7AM ---------- */
 let lastSummaryDay = null;
 
 setInterval(() => {
@@ -237,7 +241,6 @@ setInterval(() => {
 
   const today = t.toDateString();
   if (today === lastSummaryDay) return;
-
   lastSummaryDay = today;
 
   db.all(`SELECT chat_id FROM chats`, (_, rows) => {
