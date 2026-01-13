@@ -1,17 +1,14 @@
 import express from "express";
 import sqlite3 from "sqlite3";
 import fetch from "node-fetch";
-import fs from "fs";
-import FormData from "form-data";
 
 /* ================= CONFIG ================= */
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 8080;
 const TG_BOT_TOKEN = process.env.TG_BOT_TOKEN;
 const DB_FILE = "/data/uptime.db";
 const POLL_INTERVAL = 5000;
 const DEVICE_TIMEOUT_MS = 2 * 60 * 1000;
 
-/* ---- ADMIN ---- */
 const ADMIN_CHAT_IDS = [1621660251];
 /* ========================================= */
 
@@ -72,11 +69,11 @@ async function resetUptimeData(chatId) {
   db.run(`DELETE FROM devices`);
   currentDeviceStatus = "UNKNOWN";
   offlineSince = null;
-  await sendTelegram(chatId, "♻️ RESET DONE\nWaiting for device sync…");
+  await sendTelegram(chatId, "♻️ RESET COMPLETE\nWaiting for device sync…");
 }
 
 /* ---------- TELEGRAM POLLING ---------- */
-async function pollTelegram() {
+setInterval(async () => {
   const res = await fetch(
     `https://api.telegram.org/bot${TG_BOT_TOKEN}/getUpdates?offset=${lastUpdateId + 1}`
   ).then(r => r.json()).catch(() => null);
@@ -86,6 +83,7 @@ async function pollTelegram() {
   for (const u of res.result) {
     lastUpdateId = u.update_id;
     if (!u.message?.text) continue;
+
     const chatId = u.message.chat.id;
     db.run(`INSERT OR IGNORE INTO chats VALUES (?)`, [chatId]);
 
@@ -94,10 +92,9 @@ async function pollTelegram() {
       resetUptimeData(chatId);
     }
   }
-}
-setInterval(pollTelegram, POLL_INTERVAL);
+}, POLL_INTERVAL);
 
-/* ---------- DEVICE TIMEOUT CHECK ---------- */
+/* ---------- DEVICE TIMEOUT ---------- */
 setInterval(() => {
   const now = Date.now();
   db.all(`SELECT * FROM devices`, (_, rows) => {
@@ -115,9 +112,11 @@ setInterval(() => {
 /* ---------- EVENT API ---------- */
 app.post("/api/event", (req, res) => {
   const { device, event, time, day_pct, state } = req.body;
-  if (!device || !event || !time) return res.status(400).json({ error: "Bad payload" });
+  if (!device || !event || !time)
+    return res.status(400).json({ error: "Bad payload" });
 
   const now = Date.now();
+
   db.run(`
     INSERT INTO devices (device, last_seen, status)
     VALUES (?, ?, 'ONLINE')
@@ -129,18 +128,27 @@ app.post("/api/event", (req, res) => {
 
   if (event === "STATE_SYNC") {
     currentDeviceStatus = state;
-    db.run(`INSERT INTO events (device, event, time, day_pct)
-            VALUES (?, ?, ?, ?)`,
-            [device, state, time, day_pct]);
+    offlineSince = state === "OFFLINE" ? now : null;
+    db.run(
+      `INSERT INTO events (device, event, time, day_pct)
+       VALUES (?, ?, ?, ?)`,
+      [device, state, time, day_pct || 0]
+    );
     broadcast(`🔄 STATE SYNC\n${device} → ${state}`);
     return res.json({ ok: true });
   }
 
-  db.run(`INSERT INTO events (device, event, time, day_pct)
-          VALUES (?, ?, ?, ?)`,
-          [device, event, time, day_pct]);
+  if (event === "ONLINE" || event === "OFFLINE") {
+    currentDeviceStatus = event;
+    offlineSince = event === "OFFLINE" ? now : null;
+  }
 
-  currentDeviceStatus = event;
+  db.run(
+    `INSERT INTO events (device, event, time, day_pct)
+     VALUES (?, ?, ?, ?)`,
+    [device, event, time, day_pct]
+  );
+
   broadcast(`${event === "ONLINE" ? "🟢" : "🔴"} ${device} ${event}`);
   res.json({ ok: true });
 });
