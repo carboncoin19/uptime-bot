@@ -2,18 +2,23 @@ import express from "express";
 import sqlite3 from "sqlite3";
 import fetch from "node-fetch";
 
-const PORT=process.env.PORT||8080;
-const TG_BOT_TOKEN=process.env.TG_BOT_TOKEN;
-const DB_FILE="/data/uptime.db";
-const TZ_OFFSET_MS=3600000;
+const PORT = process.env.PORT || 8080;
+const TG_BOT_TOKEN = process.env.TG_BOT_TOKEN;
+const DB_FILE = "/data/uptime.db";
+const TZ_OFFSET_MS = 3600000;
 
-const app=express();
+const app = express();
 app.use(express.json());
-const db=new sqlite3.Database(DB_FILE);
+const db = new sqlite3.Database(DB_FILE);
 
 /* ---------- DB ---------- */
-db.serialize(()=>{
+db.serialize(() => {
   db.run(`CREATE TABLE IF NOT EXISTS chats(chat_id INTEGER PRIMARY KEY)`);
+  db.run(`CREATE TABLE IF NOT EXISTS devices(
+    device TEXT PRIMARY KEY,
+    last_seen INTEGER,
+    status TEXT
+  )`);
   db.run(`CREATE TABLE IF NOT EXISTS daily_uptime(
     device TEXT, day INTEGER, uptime_ms INTEGER,
     PRIMARY KEY(device,day)
@@ -30,6 +35,7 @@ function formatTime(ms){
 
 /* ---------- TELEGRAM ---------- */
 async function tg(chat,text){
+  if(!TG_BOT_TOKEN) return;
   await fetch(`https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage`,{
     method:"POST",
     headers:{"Content-Type":"application/json"},
@@ -60,6 +66,20 @@ function avg(device,days){
 /* ---------- EVENT API ---------- */
 app.post("/api/event",(req,res)=>{
   const {device,event,uptime_ms,day,time}=req.body;
+  const now=Date.now();
+
+  if(device){
+    db.run(`
+      INSERT INTO devices(device,last_seen,status)
+      VALUES(?,?,?)
+      ON CONFLICT(device)
+      DO UPDATE SET last_seen=?
+    `,[device,now,event==="ONLINE"||event==="OFFLINE"?event:null,now]);
+  }
+
+  if(event==="HEARTBEAT"){
+    return res.json({ok:true});   // ✅ FIX: refresh last_seen only
+  }
 
   if(event==="DAILY_SYNC"){
     db.run(`
@@ -69,9 +89,9 @@ app.post("/api/event",(req,res)=>{
   }
 
   if(event==="ONLINE"||event==="OFFLINE"){
+    db.run(`UPDATE devices SET status=? WHERE device=?`,[event,device]);
     broadcast(
-      `${event==="ONLINE"?"🟢 ONLINE":"🔴 OFFLINE"}\n`+
-      `${device}\n🕒 ${time||formatTime(Date.now())}`
+      `${event==="ONLINE"?"🟢 ONLINE":"🔴 OFFLINE"}\n${device}\n🕒 ${time||formatTime(now)}`
     );
   }
 
