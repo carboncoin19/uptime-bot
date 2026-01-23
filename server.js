@@ -15,6 +15,9 @@ const TG_POLL_MS = 4000;
 const MIDNIGHT_CHECK_MS = 15000;
 
 const DEFAULT_DEVICE = "KAINJI-Uptime";
+
+// NEW: if device hasn't been seen recently => UNKNOWN
+const DEVICE_STALE_MS = 2 * 60 * 1000; // 2 minutes
 /* ========================================= */
 
 const app = express();
@@ -131,6 +134,29 @@ function slaPercent(uptimeMs) {
 function bar(p) {
   const blocks = Math.round((p / 100) * 10);
   return "█".repeat(blocks) + "░".repeat(10 - blocks);
+}
+
+/* ---------- LIVE STATUS HELPERS (NEW) ---------- */
+function computeLiveStatus(deviceRow) {
+  if (!deviceRow?.last_seen) return "UNKNOWN";
+
+  const age = Date.now() - deviceRow.last_seen;
+
+  // If ESP not seen recently => unreachable
+  if (age > DEVICE_STALE_MS) return "UNKNOWN";
+
+  // ESP reachable => show last pin state
+  if (deviceRow.status === "ONLINE") return "ONLINE";
+  if (deviceRow.status === "OFFLINE") return "OFFLINE";
+
+  return "UNKNOWN";
+}
+
+async function getDeviceRow(device) {
+  return await dbGet(
+    `SELECT device,last_seen,status FROM devices WHERE device=?`,
+    [device]
+  );
 }
 
 /* ---------- TELEGRAM ---------- */
@@ -263,7 +289,10 @@ app.post("/api/event", async (req, res) => {
     );
 
     if (status) {
-      await dbRun(`UPDATE devices SET status=? WHERE device=?`, [status, device]);
+      await dbRun(`UPDATE devices SET status=? WHERE device=?`, [
+        status,
+        device,
+      ]);
     }
   }
 
@@ -333,8 +362,8 @@ async function handleTelegramCommand(chat, cmd) {
       devices
         .map((d) => {
           const seen = d.last_seen ? formatTime(d.last_seen) : "never";
-          const st = d.status || "UNKNOWN";
-          return `• ${d.device}\n  Status: ${st}\n  Last seen: ${seen}\n`;
+          const live = computeLiveStatus(d);
+          return `• ${d.device}\n  Status: ${live}\n  Last seen: ${seen}\n`;
         })
         .join("\n");
 
@@ -346,10 +375,15 @@ async function handleTelegramCommand(chat, cmd) {
     const day = todayEpochSec();
     const up = await getDailyUptime(DEFAULT_DEVICE, day);
 
+    const dev = await getDeviceRow(DEFAULT_DEVICE);
+    const liveStatus = computeLiveStatus(dev);
+
     if (up === null) {
       return tg(
         chat,
-        "⚠️ No DAILY_SYNC for today yet.\nTry again after midnight sync or check /statusweek."
+        "⚠️ No DAILY_SYNC for today yet.\n" +
+          `📡 Device status: ${liveStatus}\n` +
+          "Try again after midnight sync or check /statusweek."
       );
     }
 
@@ -360,6 +394,7 @@ async function handleTelegramCommand(chat, cmd) {
       chat,
       `📊 Today SLA\n` +
         `📟 ${DEFAULT_DEVICE}\n` +
+        `📡 Status: ${liveStatus}\n` +
         `📅 ${epochSecToLabel(day)}\n\n` +
         `SLA: ${p.toFixed(2)}%\n` +
         `Uptime: ${hours.toFixed(2)}h\n` +
