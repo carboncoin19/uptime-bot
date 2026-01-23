@@ -258,6 +258,13 @@ app.post("/api/event", async (req, res) => {
     return res.json({ ok: true });
   }
 
+  // ============================
+  // 🧪 TEST 3: LOG DAILY_SYNC
+  // ============================
+  if (event === "DAILY_SYNC") {
+    console.log("📥 DAILY_SYNC received:", { device, day, uptime_ms });
+  }
+
   if (event === "DAILY_SYNC") {
     if (device && typeof day === "number") {
       await dbRun(
