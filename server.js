@@ -20,51 +20,97 @@ const DEFAULT_DEVICE = "KAINJI-Uptime";
 const app = express();
 app.use(express.json());
 
-const db = new sqlite3.Database(DB_FILE);
+const db = new sqlite3.Database(DB_FILE, (err) => {
+  if (err) {
+    console.log("❌ Failed to open DB:", err.message);
+  } else {
+    console.log("✅ SQLite DB opened at:", DB_FILE);
+  }
+});
+
+// Optional: helps stability + concurrency
+db.get("PRAGMA journal_mode=WAL;", (err, row) => {
+  console.log("📌 WAL mode:", err?.message || row);
+});
 
 /* ---------- DB INIT ---------- */
 db.serialize(() => {
-  db.run(`CREATE TABLE IF NOT EXISTS chats(
-    chat_id INTEGER PRIMARY KEY
-  )`);
+  db.run(
+    `CREATE TABLE IF NOT EXISTS chats(
+      chat_id INTEGER PRIMARY KEY
+    )`,
+    (err) => err && console.log("❌ Create chats table error:", err.message)
+  );
 
-  db.run(`CREATE TABLE IF NOT EXISTS devices(
-    device TEXT PRIMARY KEY,
-    last_seen INTEGER,
-    status TEXT
-  )`);
+  db.run(
+    `CREATE TABLE IF NOT EXISTS devices(
+      device TEXT PRIMARY KEY,
+      last_seen INTEGER,
+      status TEXT
+    )`,
+    (err) => err && console.log("❌ Create devices table error:", err.message)
+  );
 
-  db.run(`CREATE TABLE IF NOT EXISTS daily_uptime(
-    device TEXT,
-    day INTEGER,
-    uptime_ms INTEGER,
-    PRIMARY KEY(device,day)
-  )`);
+  db.run(
+    `CREATE TABLE IF NOT EXISTS daily_uptime(
+      device TEXT,
+      day INTEGER,
+      uptime_ms INTEGER,
+      PRIMARY KEY(device,day)
+    )`,
+    (err) => err && console.log("❌ Create daily_uptime table error:", err.message)
+  );
 
-  db.run(`CREATE TABLE IF NOT EXISTS monthly_uptime(
-    device TEXT,
-    month INTEGER,
-    uptime_ms INTEGER,
-    PRIMARY KEY(device,month)
-  )`);
+  db.run(
+    `CREATE TABLE IF NOT EXISTS monthly_uptime(
+      device TEXT,
+      month INTEGER,
+      uptime_ms INTEGER,
+      PRIMARY KEY(device,month)
+    )`,
+    (err) => err && console.log("❌ Create monthly_uptime table error:", err.message)
+  );
+
+  console.log("✅ DB tables ensured");
 });
 
-/* ---------- DB PROMISE HELPERS ---------- */
+/* ---------- DB PROMISE HELPERS (PATCHED) ---------- */
 function dbGet(sql, params = []) {
   return new Promise((resolve) => {
-    db.get(sql, params, (_, row) => resolve(row));
+    db.get(sql, params, (err, row) => {
+      if (err) {
+        console.log("❌ DB GET ERROR:", err.message);
+        console.log("SQL:", sql, params);
+        return resolve(null);
+      }
+      resolve(row);
+    });
   });
 }
 
 function dbAll(sql, params = []) {
   return new Promise((resolve) => {
-    db.all(sql, params, (_, rows) => resolve(rows || []));
+    db.all(sql, params, (err, rows) => {
+      if (err) {
+        console.log("❌ DB ALL ERROR:", err.message);
+        console.log("SQL:", sql, params);
+        return resolve([]);
+      }
+      resolve(rows || []);
+    });
   });
 }
 
 function dbRun(sql, params = []) {
   return new Promise((resolve) => {
-    db.run(sql, params, () => resolve(true));
+    db.run(sql, params, function (err) {
+      if (err) {
+        console.log("❌ DB RUN ERROR:", err.message);
+        console.log("SQL:", sql, params);
+        return resolve(false);
+      }
+      resolve(true);
+    });
   });
 }
 
@@ -264,20 +310,22 @@ app.post("/api/event", async (req, res) => {
 
   if (event === "DAILY_SYNC") {
     if (device && typeof day === "number") {
-      await dbRun(
+      const ok = await dbRun(
         `INSERT OR REPLACE INTO daily_uptime(device,day,uptime_ms)
          VALUES(?,?,?)`,
         [device, day, uptime_ms || 0]
       );
 
-      // ✅ DEBUG: confirm it was saved
+      console.log("💾 DAILY_SYNC insert result:", ok);
+
+      // confirm saved
       const saved = await dbGet(
         `SELECT uptime_ms FROM daily_uptime WHERE device=? AND day=?`,
         [device, day]
       );
       console.log("✅ DAILY_SYNC saved check:", saved);
 
-      // ✅ DEBUG: show last 5 rows
+      // show last 5
       const rows = await dbAll(
         `SELECT device, day, uptime_ms FROM daily_uptime ORDER BY day DESC LIMIT 5`
       );
