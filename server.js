@@ -193,14 +193,12 @@ async function buildDailySummaryText(device, dayEpochSec) {
   );
 }
 
-/* ---------- MIDNIGHT SCHEDULER ---------- */
-let lastSummaryDay = null;
+/* ---------- MIDNIGHT SCHEDULER (PATCHED) ---------- */
+let lastSummaryKey = null;
 
 async function midnightSchedulerTick() {
   const today = todayEpochSec();
   const yesterday = today - 86400;
-
-  if (lastSummaryDay === today) return;
 
   const nowLocal = new Date(Date.now() + TZ_OFFSET_MS);
   const seconds =
@@ -208,12 +206,26 @@ async function midnightSchedulerTick() {
     nowLocal.getMinutes() * 60 +
     nowLocal.getSeconds();
 
-  if (seconds < 20) return;
+  // PATCH:
+  // Send summary only between 00:01:00 and 00:10:00
+  // This avoids missing midnight and gives ESP time to upload DAILY_SYNC.
+  if (seconds < 60 || seconds > 600) return;
+
+  // Prevent duplicates
+  if (lastSummaryKey === yesterday) return;
+
+  // PATCH:
+  // Wait until DAILY_SYNC exists, so we don't send empty summary.
+  const up = await getDailyUptime(DEFAULT_DEVICE, yesterday);
+  if (up === null) {
+    console.log("⏳ Waiting for DAILY_SYNC for", yesterday);
+    return;
+  }
 
   const msg = await buildDailySummaryText(DEFAULT_DEVICE, yesterday);
   await broadcast(msg);
 
-  lastSummaryDay = today;
+  lastSummaryKey = yesterday;
   console.log("✅ Sent daily summary for", yesterday);
 }
 
@@ -401,7 +413,10 @@ async function handleTelegramCommand(chat, cmd) {
     }
 
     const hours = up / 3600000;
-    const daysSoFar = Math.max(1, Math.floor((Date.now() + TZ_OFFSET_MS - m * 1000) / DAY_MS));
+    const daysSoFar = Math.max(
+      1,
+      Math.floor((Date.now() + TZ_OFFSET_MS - m * 1000) / DAY_MS)
+    );
     const expected = daysSoFar * DAY_MS;
     const sla = Math.min(100, (up / expected) * 100);
 
