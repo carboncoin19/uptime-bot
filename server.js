@@ -15,6 +15,7 @@ const TG_POLL_MS = 4000;
 const MIDNIGHT_CHECK_MS = 15000;
 
 const DEFAULT_DEVICE = "KAINJI-Uptime";
+
 /* ========================================= */
 
 const app = express();
@@ -469,3 +470,4 @@ setInterval(() => {
 
 /* ---------- START SERVER ---------- */
 app.listen(PORT, () => console.log("🚀 Server running on", PORT));
+
