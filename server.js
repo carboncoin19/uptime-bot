@@ -189,16 +189,6 @@ async function getDailyUptime(device, dayEpochSec) {
   return row?.uptime_ms ?? null;
 }
 
-async function getLatestDailyRow(device) {
-  return await dbGet(
-    `SELECT day, uptime_ms FROM daily_uptime
-     WHERE device=?
-     ORDER BY day DESC
-     LIMIT 1`,
-    [device]
-  );
-}
-
 async function getLastNDays(device, n) {
   return await dbAll(
     `SELECT day, uptime_ms FROM daily_uptime
@@ -249,7 +239,7 @@ async function buildDailySummaryText(device, dayEpochSec) {
   );
 }
 
-/* ---------- 7AM SCHEDULER (FIXED) ---------- */
+/* ---------- 7AM SUMMARY SCHEDULER (YESTERDAY ONLY) ---------- */
 let lastSummaryKey = null;
 
 async function midnightSchedulerTick() {
@@ -268,21 +258,14 @@ async function midnightSchedulerTick() {
   // Prevent duplicates
   if (lastSummaryKey === yesterday) return;
 
-  // Prefer yesterday, but fallback to latest row if mismatch
-  let targetDay = yesterday;
-  let up = await getDailyUptime(DEFAULT_DEVICE, targetDay);
+  // STRICT: must be yesterday only
+  const up = await getDailyUptime(DEFAULT_DEVICE, yesterday);
+  if (up === null) return;
 
-  if (up === null) {
-    const latest = await getLatestDailyRow(DEFAULT_DEVICE);
-    if (!latest?.day) return;
-    targetDay = latest.day;
-    up = latest.uptime_ms ?? 0;
-  }
-
-  const msg = await buildDailySummaryText(DEFAULT_DEVICE, targetDay);
+  const msg = await buildDailySummaryText(DEFAULT_DEVICE, yesterday);
   await broadcast(msg);
 
-  lastSummaryKey = targetDay;
+  lastSummaryKey = yesterday;
 }
 
 /* ---------- EVENT API ---------- */
@@ -292,8 +275,7 @@ app.post("/api/event", async (req, res) => {
 
   // Update devices table
   if (device) {
-    const status =
-      event === "ONLINE" || event === "OFFLINE" ? event : null;
+    const status = event === "ONLINE" || event === "OFFLINE" ? event : null;
 
     await dbRun(
       `
@@ -387,22 +369,12 @@ async function handleTelegramCommand(chat, cmd) {
     return tg(chat, text);
   }
 
-  // YESTERDAY 24H SLA (FIXED)
+  // ✅ /status = STRICT yesterday only
   if (cmd === "/status") {
     const today = todayEpochSec();
     const yesterday = today - 86400;
 
-    let targetDay = yesterday;
-    let up = await getDailyUptime(DEFAULT_DEVICE, targetDay);
-
-    // fallback: latest synced day if yesterday mismatch
-    if (up === null) {
-      const latest = await getLatestDailyRow(DEFAULT_DEVICE);
-      if (latest?.day) {
-        targetDay = latest.day;
-        up = latest.uptime_ms ?? 0;
-      }
-    }
+    const up = await getDailyUptime(DEFAULT_DEVICE, yesterday);
 
     const dev = await getDeviceRow(DEFAULT_DEVICE);
     const liveStatus = computeLiveStatus(dev);
@@ -410,9 +382,11 @@ async function handleTelegramCommand(chat, cmd) {
     if (up === null) {
       return tg(
         chat,
-        "⚠️ No DAILY_SYNC data yet.\n" +
-          `📡 Device status: ${liveStatus}\n` +
-          "Try again later or check /statusweek."
+        `⚠️ No DAILY_SYNC for yesterday yet.\n` +
+          `📅 Expected day: ${epochSecToLabel(yesterday)}\n` +
+          `📡 Device status: ${liveStatus}\n\n` +
+          `This means ESP32 has not uploaded yesterday summary yet.\n` +
+          `Try again later or check /statusweek.`
       );
     }
 
@@ -424,7 +398,7 @@ async function handleTelegramCommand(chat, cmd) {
       `📊 Yesterday SLA (24h)\n` +
         `📟 ${DEFAULT_DEVICE}\n` +
         `📡 Status: ${liveStatus}\n` +
-        `📅 ${epochSecToLabel(targetDay)}\n\n` +
+        `📅 ${epochSecToLabel(yesterday)}\n\n` +
         `SLA: ${p.toFixed(2)}%\n` +
         `Uptime: ${hours.toFixed(2)}h\n` +
         `${bar(p)}`
