@@ -136,7 +136,7 @@ function bar(p) {
   return "█".repeat(blocks) + "░".repeat(10 - blocks);
 }
 
-/* ---------- LIVE STATUS HELPERS (NEW) ---------- */
+/* ---------- LIVE STATUS HELPERS ---------- */
 function computeLiveStatus(deviceRow) {
   if (!deviceRow?.last_seen) return "UNKNOWN";
 
@@ -189,6 +189,16 @@ async function getDailyUptime(device, dayEpochSec) {
   return row?.uptime_ms ?? null;
 }
 
+async function getLatestDailyRow(device) {
+  return await dbGet(
+    `SELECT day, uptime_ms FROM daily_uptime
+     WHERE device=?
+     ORDER BY day DESC
+     LIMIT 1`,
+    [device]
+  );
+}
+
 async function getLastNDays(device, n) {
   return await dbAll(
     `SELECT day, uptime_ms FROM daily_uptime
@@ -239,7 +249,7 @@ async function buildDailySummaryText(device, dayEpochSec) {
   );
 }
 
-/* ---------- 7AM SUMMARY SCHEDULER (UPDATED) ---------- */
+/* ---------- 7AM SCHEDULER (FIXED) ---------- */
 let lastSummaryKey = null;
 
 async function midnightSchedulerTick() {
@@ -252,22 +262,27 @@ async function midnightSchedulerTick() {
     nowLocal.getMinutes() * 60 +
     nowLocal.getSeconds();
 
-  // ✅ Send summary only between 07:00:00 and 07:10:00 (Nigeria time)
-  // 07:00:00 = 25200 seconds
-  // 07:10:00 = 25800 seconds
+  // Send summary only between 07:00:00 and 07:10:00
   if (seconds < 25200 || seconds > 25800) return;
 
   // Prevent duplicates
   if (lastSummaryKey === yesterday) return;
 
-  // Wait until DAILY_SYNC exists
-  const up = await getDailyUptime(DEFAULT_DEVICE, yesterday);
-  if (up === null) return;
+  // Prefer yesterday, but fallback to latest row if mismatch
+  let targetDay = yesterday;
+  let up = await getDailyUptime(DEFAULT_DEVICE, targetDay);
 
-  const msg = await buildDailySummaryText(DEFAULT_DEVICE, yesterday);
+  if (up === null) {
+    const latest = await getLatestDailyRow(DEFAULT_DEVICE);
+    if (!latest?.day) return;
+    targetDay = latest.day;
+    up = latest.uptime_ms ?? 0;
+  }
+
+  const msg = await buildDailySummaryText(DEFAULT_DEVICE, targetDay);
   await broadcast(msg);
 
-  lastSummaryKey = yesterday;
+  lastSummaryKey = targetDay;
 }
 
 /* ---------- EVENT API ---------- */
@@ -344,7 +359,7 @@ async function handleTelegramCommand(chat, cmd) {
     return tg(
       chat,
       "📡 ESP32 SLA Monitor\n\n" +
-        "/status – Yesterday (24h) SLA\n" +   // ✅ updated label
+        "/status – Yesterday (24h) SLA\n" +
         "/statusweek – Last 7 days chart\n" +
         "/statusmonth – Past 30 days summary\n" +
         "/month – Current month uptime (MONTHLY_SYNC)\n" +
@@ -372,12 +387,22 @@ async function handleTelegramCommand(chat, cmd) {
     return tg(chat, text);
   }
 
-  // ✅ YESTERDAY 24H SLA (UPDATED)
+  // YESTERDAY 24H SLA (FIXED)
   if (cmd === "/status") {
     const today = todayEpochSec();
     const yesterday = today - 86400;
 
-    const up = await getDailyUptime(DEFAULT_DEVICE, yesterday);
+    let targetDay = yesterday;
+    let up = await getDailyUptime(DEFAULT_DEVICE, targetDay);
+
+    // fallback: latest synced day if yesterday mismatch
+    if (up === null) {
+      const latest = await getLatestDailyRow(DEFAULT_DEVICE);
+      if (latest?.day) {
+        targetDay = latest.day;
+        up = latest.uptime_ms ?? 0;
+      }
+    }
 
     const dev = await getDeviceRow(DEFAULT_DEVICE);
     const liveStatus = computeLiveStatus(dev);
@@ -385,7 +410,7 @@ async function handleTelegramCommand(chat, cmd) {
     if (up === null) {
       return tg(
         chat,
-        "⚠️ No DAILY_SYNC for yesterday yet.\n" +
+        "⚠️ No DAILY_SYNC data yet.\n" +
           `📡 Device status: ${liveStatus}\n` +
           "Try again later or check /statusweek."
       );
@@ -399,7 +424,7 @@ async function handleTelegramCommand(chat, cmd) {
       `📊 Yesterday SLA (24h)\n` +
         `📟 ${DEFAULT_DEVICE}\n` +
         `📡 Status: ${liveStatus}\n` +
-        `📅 ${epochSecToLabel(yesterday)}\n\n` +
+        `📅 ${epochSecToLabel(targetDay)}\n\n` +
         `SLA: ${p.toFixed(2)}%\n` +
         `Uptime: ${hours.toFixed(2)}h\n` +
         `${bar(p)}`
