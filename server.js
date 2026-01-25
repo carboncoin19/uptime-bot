@@ -189,12 +189,14 @@ async function getDailyUptime(device, dayEpochSec) {
   return row?.uptime_ms ?? null;
 }
 
-// ✅ NEW: range-safe lookup (fixes epoch mismatch while keeping yesterday-only behavior)
+// ✅ Range-safe lookup (fixes epoch mismatch)
+// ✅ Picks the BEST record in the day range (highest uptime_ms)
+// This prevents selecting a 0h row when a valid 24h row exists.
 async function getDailyUptimeByRange(device, startEpochSec, endEpochSec) {
   return await dbGet(
     `SELECT day, uptime_ms FROM daily_uptime
      WHERE device=? AND day BETWEEN ? AND ?
-     ORDER BY day DESC
+     ORDER BY uptime_ms DESC, day DESC
      LIMIT 1`,
     [device, startEpochSec, endEpochSec]
   );
@@ -383,7 +385,7 @@ async function handleTelegramCommand(chat, cmd) {
     return tg(chat, text);
   }
 
-  // ✅ /status = STRICT yesterday only (RANGE SAFE)
+  // ✅ /status = STRICT yesterday only (RANGE SAFE + BEST UPTIME PICK)
   if (cmd === "/status") {
     const today = todayEpochSec();
     const yesterday = today - 86400;
