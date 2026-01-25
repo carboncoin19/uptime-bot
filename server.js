@@ -189,6 +189,17 @@ async function getDailyUptime(device, dayEpochSec) {
   return row?.uptime_ms ?? null;
 }
 
+// ✅ NEW: range-safe lookup (fixes epoch mismatch while keeping yesterday-only behavior)
+async function getDailyUptimeByRange(device, startEpochSec, endEpochSec) {
+  return await dbGet(
+    `SELECT day, uptime_ms FROM daily_uptime
+     WHERE device=? AND day BETWEEN ? AND ?
+     ORDER BY day DESC
+     LIMIT 1`,
+    [device, startEpochSec, endEpochSec]
+  );
+}
+
 async function getLastNDays(device, n) {
   return await dbAll(
     `SELECT day, uptime_ms FROM daily_uptime
@@ -239,7 +250,7 @@ async function buildDailySummaryText(device, dayEpochSec) {
   );
 }
 
-/* ---------- 7AM SUMMARY SCHEDULER (YESTERDAY ONLY) ---------- */
+/* ---------- 7AM SUMMARY SCHEDULER (YESTERDAY ONLY, RANGE SAFE) ---------- */
 let lastSummaryKey = null;
 
 async function midnightSchedulerTick() {
@@ -258,11 +269,14 @@ async function midnightSchedulerTick() {
   // Prevent duplicates
   if (lastSummaryKey === yesterday) return;
 
-  // STRICT: must be yesterday only
-  const up = await getDailyUptime(DEFAULT_DEVICE, yesterday);
-  if (up === null) return;
+  // STRICT yesterday only, but tolerate epoch mismatch by using a range search
+  const start = yesterday;
+  const end = yesterday + 86399;
 
-  const msg = await buildDailySummaryText(DEFAULT_DEVICE, yesterday);
+  const row = await getDailyUptimeByRange(DEFAULT_DEVICE, start, end);
+  if (!row) return;
+
+  const msg = await buildDailySummaryText(DEFAULT_DEVICE, row.day);
   await broadcast(msg);
 
   lastSummaryKey = yesterday;
@@ -369,17 +383,20 @@ async function handleTelegramCommand(chat, cmd) {
     return tg(chat, text);
   }
 
-  // ✅ /status = STRICT yesterday only
+  // ✅ /status = STRICT yesterday only (RANGE SAFE)
   if (cmd === "/status") {
     const today = todayEpochSec();
     const yesterday = today - 86400;
 
-    const up = await getDailyUptime(DEFAULT_DEVICE, yesterday);
+    const start = yesterday;
+    const end = yesterday + 86399;
+
+    const row = await getDailyUptimeByRange(DEFAULT_DEVICE, start, end);
 
     const dev = await getDeviceRow(DEFAULT_DEVICE);
     const liveStatus = computeLiveStatus(dev);
 
-    if (up === null) {
+    if (!row) {
       return tg(
         chat,
         `⚠️ No DAILY_SYNC for yesterday yet.\n` +
@@ -390,6 +407,7 @@ async function handleTelegramCommand(chat, cmd) {
       );
     }
 
+    const up = row.uptime_ms ?? 0;
     const p = slaPercent(up);
     const hours = up / 3600000;
 
