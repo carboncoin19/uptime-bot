@@ -239,7 +239,7 @@ async function buildDailySummaryText(device, dayEpochSec) {
   );
 }
 
-/* ---------- MIDNIGHT SCHEDULER ---------- */
+/* ---------- 7AM SUMMARY SCHEDULER (UPDATED) ---------- */
 let lastSummaryKey = null;
 
 async function midnightSchedulerTick() {
@@ -252,8 +252,10 @@ async function midnightSchedulerTick() {
     nowLocal.getMinutes() * 60 +
     nowLocal.getSeconds();
 
-  // Send summary only between 00:01:00 and 00:10:00
-  if (seconds < 60 || seconds > 600) return;
+  // ✅ Send summary only between 07:00:00 and 07:10:00 (Nigeria time)
+  // 07:00:00 = 25200 seconds
+  // 07:10:00 = 25800 seconds
+  if (seconds < 25200 || seconds > 25800) return;
 
   // Prevent duplicates
   if (lastSummaryKey === yesterday) return;
@@ -342,7 +344,7 @@ async function handleTelegramCommand(chat, cmd) {
     return tg(
       chat,
       "📡 ESP32 SLA Monitor\n\n" +
-        "/status – Today SLA\n" +
+        "/status – Yesterday (24h) SLA\n" +   // ✅ updated label
         "/statusweek – Last 7 days chart\n" +
         "/statusmonth – Past 30 days summary\n" +
         "/month – Current month uptime (MONTHLY_SYNC)\n" +
@@ -370,10 +372,12 @@ async function handleTelegramCommand(chat, cmd) {
     return tg(chat, text);
   }
 
-  // TODAY SLA
+  // ✅ YESTERDAY 24H SLA (UPDATED)
   if (cmd === "/status") {
-    const day = todayEpochSec();
-    const up = await getDailyUptime(DEFAULT_DEVICE, day);
+    const today = todayEpochSec();
+    const yesterday = today - 86400;
+
+    const up = await getDailyUptime(DEFAULT_DEVICE, yesterday);
 
     const dev = await getDeviceRow(DEFAULT_DEVICE);
     const liveStatus = computeLiveStatus(dev);
@@ -381,9 +385,9 @@ async function handleTelegramCommand(chat, cmd) {
     if (up === null) {
       return tg(
         chat,
-        "⚠️ No DAILY_SYNC for today yet.\n" +
+        "⚠️ No DAILY_SYNC for yesterday yet.\n" +
           `📡 Device status: ${liveStatus}\n` +
-          "Try again after midnight sync or check /statusweek."
+          "Try again later or check /statusweek."
       );
     }
 
@@ -392,10 +396,10 @@ async function handleTelegramCommand(chat, cmd) {
 
     return tg(
       chat,
-      `📊 Today SLA\n` +
+      `📊 Yesterday SLA (24h)\n` +
         `📟 ${DEFAULT_DEVICE}\n` +
         `📡 Status: ${liveStatus}\n` +
-        `📅 ${epochSecToLabel(day)}\n\n` +
+        `📅 ${epochSecToLabel(yesterday)}\n\n` +
         `SLA: ${p.toFixed(2)}%\n` +
         `Uptime: ${hours.toFixed(2)}h\n` +
         `${bar(p)}`
@@ -502,7 +506,7 @@ setInterval(async () => {
   }
 }, TG_POLL_MS);
 
-/* ---------- MIDNIGHT SUMMARY LOOP ---------- */
+/* ---------- 7AM SUMMARY LOOP ---------- */
 setInterval(() => {
   midnightSchedulerTick().catch(() => {});
 }, MIDNIGHT_CHECK_MS);
