@@ -189,19 +189,6 @@ async function getDailyUptime(device, dayEpochSec) {
   return row?.uptime_ms ?? null;
 }
 
-// ✅ Range-safe lookup (fixes epoch mismatch)
-// ✅ Picks the BEST record in the day range (highest uptime_ms)
-// This prevents selecting a 0h row when a valid 24h row exists.
-async function getDailyUptimeByRange(device, startEpochSec, endEpochSec) {
-  return await dbGet(
-    `SELECT day, uptime_ms FROM daily_uptime
-     WHERE device=? AND day BETWEEN ? AND ?
-     ORDER BY uptime_ms DESC, day DESC
-     LIMIT 1`,
-    [device, startEpochSec, endEpochSec]
-  );
-}
-
 async function getLastNDays(device, n) {
   return await dbAll(
     `SELECT day, uptime_ms FROM daily_uptime
@@ -252,7 +239,7 @@ async function buildDailySummaryText(device, dayEpochSec) {
   );
 }
 
-/* ---------- 7AM SUMMARY SCHEDULER (YESTERDAY ONLY, RANGE SAFE) ---------- */
+/* ---------- 7AM SUMMARY SCHEDULER (YESTERDAY USING SAME METHOD AS /statusweek) ---------- */
 let lastSummaryKey = null;
 
 async function midnightSchedulerTick() {
@@ -268,17 +255,18 @@ async function midnightSchedulerTick() {
   // Send summary only between 07:00:00 and 07:10:00
   if (seconds < 25200 || seconds > 25800) return;
 
-  // Prevent duplicates
+  // Prevent duplicates (still tied to "yesterday" day)
   if (lastSummaryKey === yesterday) return;
 
-  // STRICT yesterday only, but tolerate epoch mismatch by using a range search
-  const start = yesterday;
-  const end = yesterday + 86399;
+  const rows = await getLastNDays(DEFAULT_DEVICE, 7);
+  if (!rows.length) return;
 
-  const row = await getDailyUptimeByRange(DEFAULT_DEVICE, start, end);
-  if (!row) return;
+  const yesterdayLabel = epochSecToLabel(yesterday);
 
-  const msg = await buildDailySummaryText(DEFAULT_DEVICE, row.day);
+  const match = rows.find((r) => epochSecToLabel(r.day) === yesterdayLabel);
+  if (!match) return;
+
+  const msg = await buildDailySummaryText(DEFAULT_DEVICE, match.day);
   await broadcast(msg);
 
   lastSummaryKey = yesterday;
@@ -385,31 +373,41 @@ async function handleTelegramCommand(chat, cmd) {
     return tg(chat, text);
   }
 
-  // ✅ /status = STRICT yesterday only (RANGE SAFE + BEST UPTIME PICK)
+  // ✅ /status NOW USES SAME DATA FORMAT AS /statusweek
   if (cmd === "/status") {
     const today = todayEpochSec();
     const yesterday = today - 86400;
 
-    const start = yesterday;
-    const end = yesterday + 86399;
-
-    const row = await getDailyUptimeByRange(DEFAULT_DEVICE, start, end);
+    const rows = await getLastNDays(DEFAULT_DEVICE, 7);
 
     const dev = await getDeviceRow(DEFAULT_DEVICE);
     const liveStatus = computeLiveStatus(dev);
 
-    if (!row) {
+    if (!rows.length) {
+      return tg(
+        chat,
+        "⚠️ No uptime history yet.\n" +
+          `📡 Device status: ${liveStatus}\n` +
+          "Try again later."
+      );
+    }
+
+    const yesterdayLabel = epochSecToLabel(yesterday);
+
+    // Find the row that /statusweek would show as "yesterday"
+    const match = rows.find((r) => epochSecToLabel(r.day) === yesterdayLabel);
+
+    if (!match) {
       return tg(
         chat,
         `⚠️ No DAILY_SYNC for yesterday yet.\n` +
-          `📅 Expected day: ${epochSecToLabel(yesterday)}\n` +
+          `📅 Expected day: ${yesterdayLabel}\n` +
           `📡 Device status: ${liveStatus}\n\n` +
-          `This means ESP32 has not uploaded yesterday summary yet.\n` +
           `Try again later or check /statusweek.`
       );
     }
 
-    const up = row.uptime_ms ?? 0;
+    const up = match.uptime_ms ?? 0;
     const p = slaPercent(up);
     const hours = up / 3600000;
 
@@ -418,7 +416,7 @@ async function handleTelegramCommand(chat, cmd) {
       `📊 Yesterday SLA (24h)\n` +
         `📟 ${DEFAULT_DEVICE}\n` +
         `📡 Status: ${liveStatus}\n` +
-        `📅 ${epochSecToLabel(yesterday)}\n\n` +
+        `📅 ${yesterdayLabel}\n\n` +
         `SLA: ${p.toFixed(2)}%\n` +
         `Uptime: ${hours.toFixed(2)}h\n` +
         `${bar(p)}`
