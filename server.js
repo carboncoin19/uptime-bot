@@ -163,7 +163,8 @@ app.post("/api/event", async (req, res) => {
   // ✅ FIXED: robust live alert broadcast
   if (event === "ONLINE" || event === "OFFLINE") {
     for (const bot of BOTS) {
-      if (bot.deviceNorm === devNorm) {
+      if (devNorm.includes(bot.deviceNorm) || bot.deviceNorm.includes(devNorm))
+ {
         broadcast(
           bot.token,
           `${event === "ONLINE" ? "🟢 ONLINE" : "🔴 OFFLINE"}\n${device}\n🕒 ${
@@ -339,3 +340,4 @@ setInterval(async () => {
 
 /* ---------- START ---------- */
 app.listen(PORT, () => console.log("🚀 Server running on", PORT));
+
