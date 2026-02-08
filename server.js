@@ -7,8 +7,10 @@ import fs from "fs";
 const PORT = process.env.PORT || 8080;
 const DB_FILE = "/data/uptime.db";
 const TZ_OFFSET_MS = 3600000; // Nigeria +1
+
 const DAY_MS = 86400000;
 const TG_POLL_MS = 4000;
+const MIDNIGHT_CHECK_MS = 15000;
 const DEVICE_STALE_MS = 2 * 60 * 1000;
 
 /* -------- MULTI BOT CONFIG -------- */
@@ -25,7 +27,7 @@ for (let i = 1; i <= 10; i++) {
     });
   }
 }
-console.log("🤖 Bots loaded:", BOTS.map(b => b.device));
+console.log("🤖 Bots:", BOTS.map(b => b.device));
 /* ================================= */
 
 /* ---------- ENSURE /data ---------- */
@@ -73,19 +75,60 @@ const dbRun = (s, p = []) => new Promise(r => db.run(s, p, () => r(true)));
 const dbGet = (s, p = []) => new Promise(r => db.get(s, p, (_, row) => r(row || null)));
 const dbAll = (s, p = []) => new Promise(r => db.all(s, p, (_, rows) => r(rows || [])));
 
+/* ---------- TIME HELPERS ---------- */
+function formatTime(ms) {
+  return new Date(ms + TZ_OFFSET_MS).toLocaleString("en-US", {
+    month: "short", day: "2-digit", year: "numeric",
+    hour: "numeric", minute: "2-digit", second: "2-digit", hour12: true
+  });
+}
+
+function todayEpochSec() {
+  const d = new Date(Date.now() + TZ_OFFSET_MS);
+  d.setHours(0, 0, 0, 0);
+  return Math.floor(d.getTime() / 1000);
+}
+
+function monthStartEpochSec() {
+  const d = new Date(Date.now() + TZ_OFFSET_MS);
+  d.setDate(1); d.setHours(0, 0, 0, 0);
+  return Math.floor(d.getTime() / 1000);
+}
+
+function epochSecToLabel(s) {
+  return new Date(s * 1000 + TZ_OFFSET_MS)
+    .toLocaleDateString("en-US", { month: "short", day: "2-digit" });
+}
+
+const slaPercent = up => Math.min(100, (up / DAY_MS) * 100);
+const bar = p =>
+  "█".repeat(Math.round((p / 100) * 10)) +
+  "░".repeat(10 - Math.round((p / 100) * 10));
+
+/* ---------- LIVE STATUS ---------- */
+function computeLiveStatus(d) {
+  if (!d?.last_seen) return "UNKNOWN";
+  if (Date.now() - d.last_seen > DEVICE_STALE_MS) return "UNKNOWN";
+  if (d.status === "ONLINE") return "ONLINE";
+  if (d.status === "OFFLINE") return "OFFLINE";
+  return "UNKNOWN";
+}
+
 /* ---------- TELEGRAM ---------- */
 async function tg(token, chat, text) {
   try {
     await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ chat_id: chat, text }),
+      body: JSON.stringify({ chat_id: chat, text, disable_web_page_preview: true }),
     });
   } catch {}
 }
 
 async function broadcast(token, text) {
-  const chats = await dbAll(`SELECT chat_id FROM chats WHERE bot_token=?`, [token]);
+  const chats = await dbAll(
+    `SELECT chat_id FROM chats WHERE bot_token=?`, [token]
+  );
   for (const c of chats) tg(token, c.chat_id, text);
 }
 
@@ -96,8 +139,8 @@ app.post("/api/event", async (req, res) => {
   const dev = String(device || "").trim();
   const devNorm = dev.toUpperCase();
 
-  /* ✅ EXACT single-bot behavior restored */
-  if (device) {
+  /* 🔥 EXACT single-bot device update logic */
+  if (dev) {
     const status = (event === "ONLINE" || event === "OFFLINE") ? event : null;
 
     await dbRun(
@@ -121,12 +164,12 @@ app.post("/api/event", async (req, res) => {
     await dbRun(`INSERT OR REPLACE INTO monthly_uptime VALUES(?,?,?)`,
       [dev, month, uptime_ms || 0]);
 
-  /* 🔔 LIVE ALERT — FIXED */
+  /* 🔔 ONLINE / OFFLINE ALERT (fixed & reliable) */
   if (event === "ONLINE" || event === "OFFLINE") {
     const msg =
       `${event === "ONLINE" ? "🟢 ONLINE" : "🔴 OFFLINE"}\n` +
       `${dev}\n` +
-      `🕒 ${time || new Date(now).toLocaleString()}`;
+      `🕒 ${time || formatTime(now)}`;
 
     for (const bot of BOTS) {
       if (bot.deviceNorm === devNorm) {
@@ -162,9 +205,79 @@ for (const bot of BOTS) {
         tg(bot.token, chat,
           `📡 ${bot.device} uptime monitor active.\nYou will now receive live alerts.`);
       }
+
+      if (cmd === "/ping") tg(bot.token, chat, "✅ Bot is alive.");
+
+      if (cmd === "/devices") {
+        const rows = await dbAll(`SELECT * FROM devices ORDER BY device`);
+        let text = "📟 Devices\n\n";
+        for (const d of rows) {
+          text += `• ${d.device}\n  Status: ${computeLiveStatus(d)}\n  Last seen: ${formatTime(d.last_seen)}\n\n`;
+        }
+        tg(bot.token, chat, text);
+      }
+
+      if (cmd === "/status") {
+        const today = todayEpochSec();
+        const yesterday = today - 86400;
+        const rows = await dbAll(
+          `SELECT day,uptime_ms FROM daily_uptime
+           WHERE device=? ORDER BY day DESC LIMIT 7`,
+          [bot.device]
+        );
+
+        const devRow = await dbGet(
+          `SELECT last_seen,status FROM devices WHERE device=?`,
+          [bot.device]
+        );
+        const live = computeLiveStatus(devRow);
+        const label = epochSecToLabel(yesterday);
+        const match = rows.find(r => epochSecToLabel(r.day) === label);
+
+        if (!match)
+          return tg(bot.token, chat,
+            `⚠️ No DAILY_SYNC for yesterday\n📟 ${bot.device}\n📡 Status: ${live}`);
+
+        const p = slaPercent(match.uptime_ms);
+        tg(bot.token, chat,
+          `📊 Yesterday SLA (24h)\n📟 ${bot.device}\n📡 Status: ${live}\n📅 ${label}\n\n` +
+          `SLA: ${p.toFixed(2)}%\nUptime: ${(match.uptime_ms/3600000).toFixed(2)}h\n${bar(p)}`);
+      }
     }
   }, TG_POLL_MS);
 }
+
+/* ---------- 7AM AUTO SUMMARY ---------- */
+let lastSummary = {};
+setInterval(async () => {
+  const today = todayEpochSec();
+  const yesterday = today - 86400;
+  const now = new Date(Date.now() + TZ_OFFSET_MS);
+  const sec = now.getHours()*3600 + now.getMinutes()*60;
+
+  if (sec < 25200 || sec > 25800) return;
+
+  for (const bot of BOTS) {
+    if (lastSummary[bot.device] === yesterday) continue;
+
+    const rows = await dbAll(
+      `SELECT day,uptime_ms FROM daily_uptime
+       WHERE device=? ORDER BY day DESC LIMIT 7`,
+      [bot.device]
+    );
+
+    const label = epochSecToLabel(yesterday);
+    const match = rows.find(r => epochSecToLabel(r.day) === label);
+    if (!match) continue;
+
+    const p = slaPercent(match.uptime_ms);
+    broadcast(bot.token,
+      `📊 Daily Summary\n📟 ${bot.device}\n📅 ${label}\n` +
+      `Uptime: ${(match.uptime_ms/3600000).toFixed(2)}h\nSLA: ${p.toFixed(2)}%`);
+
+    lastSummary[bot.device] = yesterday;
+  }
+}, MIDNIGHT_CHECK_MS);
 
 /* ---------- START ---------- */
 app.listen(PORT, () => console.log("🚀 Server running on", PORT));
