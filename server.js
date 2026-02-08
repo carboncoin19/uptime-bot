@@ -190,27 +190,32 @@ for (const bot of BOTS) {
         [chat, bot.token]
       );
 
-      /* ===== /STATUS (FIXED – RANGE BASED) ===== */
+      /* ===== /STATUS (FIXED – SAME AS OLD CODE) ===== */
       if (cmd === "/status") {
         const today = todayEpochSec();
-        const yStart = today - 86400;
-        const yEnd = today;
+        const yesterday = today - 86400;
+        const yLabel = epochSecToLabel(yesterday);
+
+        const rows = await dbAll(
+          `SELECT day,uptime_ms
+           FROM daily_uptime
+           WHERE device=?
+           ORDER BY day DESC
+           LIMIT 7`,
+          [bot.device]
+        );
 
         const dev = await dbGet(
           `SELECT last_seen,status FROM devices WHERE device=?`,
           [bot.device]
         );
-
-        const row = await dbGet(
-          `SELECT day,uptime_ms FROM daily_uptime
-           WHERE device=? AND day>=? AND day<?
-           ORDER BY day DESC LIMIT 1`,
-          [bot.device, yStart, yEnd]
-        );
-
         const live = computeLiveStatus(dev);
 
-        if (!row) {
+        const match = rows.find(
+          (r) => epochSecToLabel(r.day) === yLabel
+        );
+
+        if (!match) {
           tg(
             bot.token,
             chat,
@@ -219,7 +224,7 @@ for (const bot of BOTS) {
           continue;
         }
 
-        const up = row.uptime_ms || 0;
+        const up = match.uptime_ms || 0;
         const p = slaPercent(up);
 
         tg(
@@ -228,7 +233,7 @@ for (const bot of BOTS) {
           `📊 Yesterday SLA (24h)\n` +
             `📟 ${bot.device}\n` +
             `📡 Status: ${live}\n` +
-            `📅 ${epochSecToLabel(row.day)}\n\n` +
+            `📅 ${epochSecToLabel(match.day)}\n\n` +
             `SLA: ${p.toFixed(2)}%\n` +
             `Uptime: ${(up / 3600000).toFixed(2)}h\n` +
             `${bar(p)}`
@@ -238,7 +243,8 @@ for (const bot of BOTS) {
       /* ===== /STATUSWEEK ===== */
       if (cmd === "/statusweek") {
         const rows = await dbAll(
-          `SELECT day,uptime_ms FROM daily_uptime WHERE device=? ORDER BY day DESC LIMIT 7`,
+          `SELECT day,uptime_ms FROM daily_uptime
+           WHERE device=? ORDER BY day DESC LIMIT 7`,
           [bot.device]
         );
 
@@ -253,16 +259,17 @@ for (const bot of BOTS) {
       /* ===== /STATUSMONTH ===== */
       if (cmd === "/statusmonth") {
         const rows = await dbAll(
-          `SELECT uptime_ms FROM daily_uptime WHERE device=? ORDER BY day DESC LIMIT 30`,
+          `SELECT uptime_ms FROM daily_uptime
+           WHERE device=? ORDER BY day DESC LIMIT 30`,
           [bot.device]
         );
         const totalUp = rows.reduce((s, r) => s + (r.uptime_ms || 0), 0);
         tg(
           bot.token,
           chat,
-          `📉 Past 30 Days\n📟 ${bot.device}\n\nTotal Uptime: ${(totalUp / 3600000).toFixed(
-            2
-          )}h`
+          `📉 Past 30 Days\n📟 ${bot.device}\n\nTotal Uptime: ${(
+            totalUp / 3600000
+          ).toFixed(2)}h`
         );
       }
 
@@ -293,31 +300,34 @@ for (const bot of BOTS) {
 let lastSummary = {};
 setInterval(async () => {
   const today = todayEpochSec();
-  const yStart = today - 86400;
-  const yEnd = today;
+  const yesterday = today - 86400;
+  const yLabel = epochSecToLabel(yesterday);
 
   const now = new Date(Date.now() + TZ_OFFSET_MS);
   const sec = now.getHours() * 3600 + now.getMinutes() * 60;
   if (sec < 25200 || sec > 25800) return;
 
   for (const bot of BOTS) {
-    if (lastSummary[bot.device] === yStart) continue;
+    if (lastSummary[bot.device] === yesterday) continue;
 
-    const row = await dbGet(
+    const rows = await dbAll(
       `SELECT day,uptime_ms FROM daily_uptime
-       WHERE device=? AND day>=? AND day<?
-       ORDER BY day DESC LIMIT 1`,
-      [bot.device, yStart, yEnd]
+       WHERE device=? ORDER BY day DESC LIMIT 7`,
+      [bot.device]
     );
 
-    if (row) {
+    const match = rows.find(
+      (r) => epochSecToLabel(r.day) === yLabel
+    );
+
+    if (match) {
       broadcast(
         bot.token,
         `📊 Daily Summary\n📟 ${bot.device}\n📅 ${epochSecToLabel(
-          row.day
-        )}\nUptime: ${(row.uptime_ms / 3600000).toFixed(2)}h`
+          match.day
+        )}\nUptime: ${(match.uptime_ms / 3600000).toFixed(2)}h`
       );
-      lastSummary[bot.device] = yStart;
+      lastSummary[bot.device] = yesterday;
     }
   }
 }, MIDNIGHT_CHECK_MS);
