@@ -4,21 +4,32 @@ import fetch from "node-fetch";
 
 /* ================= CONFIG ================= */
 const PORT = process.env.PORT || 8080;
-const TG_BOT_TOKEN = process.env.TG_BOT_TOKEN;
 
 const DB_FILE = "/data/uptime.db";
 const TZ_OFFSET_MS = 3600000; // Nigeria +1
 
 const DAY_MS = 86400000;
-
 const TG_POLL_MS = 4000;
 const MIDNIGHT_CHECK_MS = 15000;
 
-const DEFAULT_DEVICE = "KAINJI-Uptime";
-
-// device stale => UNKNOWN
 const DEVICE_STALE_MS = 2 * 60 * 1000;
-/* ========================================= */
+
+/* -------- MULTI BOT CONFIG (ENV FIXED) -------- */
+const BOTS = [];
+
+for (let i = 1; i <= 10; i++) {
+  const token = process.env[`TG_BOT_TOKEN_${i}`];
+  const device = process.env[`TG_BOT_DEVICE_${i}`];
+
+  if (token && device) {
+    BOTS.push({
+      token,
+      device,
+      lastId: 0,
+    });
+  }
+}
+/* ============================================= */
 
 const app = express();
 app.use(express.json());
@@ -28,12 +39,15 @@ const db = new sqlite3.Database(DB_FILE, (err) => {
   else console.log("✅ SQLite DB opened at:", DB_FILE);
 });
 
-// stability
 db.get("PRAGMA journal_mode=WAL;", () => {});
 
 /* ---------- DB INIT ---------- */
 db.serialize(() => {
-  db.run(`CREATE TABLE IF NOT EXISTS chats(chat_id INTEGER PRIMARY KEY)`);
+  db.run(`CREATE TABLE IF NOT EXISTS chats(
+    chat_id INTEGER,
+    bot_token TEXT,
+    PRIMARY KEY(chat_id, bot_token)
+  )`);
 
   db.run(`CREATE TABLE IF NOT EXISTS devices(
     device TEXT PRIMARY KEY,
@@ -58,7 +72,7 @@ db.serialize(() => {
   console.log("✅ DB tables ensured");
 });
 
-/* ---------- DB PROMISE HELPERS ---------- */
+/* ---------- DB HELPERS ---------- */
 const dbGet = (sql, p = []) =>
   new Promise((r) => db.get(sql, p, (_, row) => r(row || null)));
 const dbAll = (sql, p = []) =>
@@ -103,7 +117,6 @@ function slaPercent(up) {
   return Math.min(100, (up / DAY_MS) * 100);
 }
 
-// ✅ NEW: total uptime percentage (multi-day aware)
 function totalSlaPercent(totalUp, totalPeriod) {
   if (!totalPeriod || totalPeriod <= 0) return 0;
   return Math.min(100, (totalUp / totalPeriod) * 100);
@@ -121,22 +134,23 @@ function computeLiveStatus(d) {
   return d.status || "UNKNOWN";
 }
 
-const getDeviceRow = (d) =>
-  dbGet(`SELECT device,last_seen,status FROM devices WHERE device=?`, [d]);
-
 /* ---------- TELEGRAM ---------- */
-async function tg(chat, text) {
-  if (!TG_BOT_TOKEN) return;
-  await fetch(`https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ chat_id: chat, text }),
-  }).catch(() => {});
+async function tg(token, chat, text) {
+  try {
+    await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ chat_id: chat, text }),
+    });
+  } catch {}
 }
 
-async function broadcast(text) {
-  const chats = await dbAll(`SELECT chat_id FROM chats`);
-  for (const c of chats) tg(c.chat_id, text);
+async function broadcast(token, text) {
+  const chats = await dbAll(
+    `SELECT chat_id FROM chats WHERE bot_token=?`,
+    [token]
+  );
+  for (const c of chats) tg(token, c.chat_id, text);
 }
 
 /* ---------- QUERIES ---------- */
@@ -151,9 +165,6 @@ const getMonthlyUptime = (d, m) =>
     d,
     m,
   ]);
-
-const getDevices = () =>
-  dbAll(`SELECT device,last_seen,status FROM devices ORDER BY device`);
 
 /* ---------- DAILY SUMMARY ---------- */
 async function buildDailySummaryText(device, day) {
@@ -183,21 +194,22 @@ async function buildDailySummaryText(device, day) {
 }
 
 /* ---------- 7AM AUTO SUMMARY ---------- */
-let lastSummaryKey = null;
+let lastSummaryKey = {};
 
 async function midnightSchedulerTick() {
-  const today = todayEpochSec();
-  const yesterday = today - 86400;
+  const yesterday = todayEpochSec() - 86400;
 
   const now = new Date(Date.now() + TZ_OFFSET_MS);
   const sec = now.getHours() * 3600 + now.getMinutes() * 60;
-
   if (sec < 25200 || sec > 25800) return;
-  if (lastSummaryKey === yesterday) return;
 
-  const msg = await buildDailySummaryText(DEFAULT_DEVICE, yesterday);
-  await broadcast(msg);
-  lastSummaryKey = yesterday;
+  for (const bot of BOTS) {
+    if (lastSummaryKey[bot.device] === yesterday) continue;
+
+    const msg = await buildDailySummaryText(bot.device, yesterday);
+    await broadcast(bot.token, msg);
+    lastSummaryKey[bot.device] = yesterday;
+  }
 }
 
 /* ---------- EVENT API ---------- */
@@ -222,96 +234,108 @@ app.post("/api/event", async (req, res) => {
   }
 
   if (event === "DAILY_SYNC")
-    await dbRun(
-      `INSERT OR REPLACE INTO daily_uptime VALUES(?,?,?)`,
-      [device, day, uptime_ms || 0]
-    );
+    await dbRun(`INSERT OR REPLACE INTO daily_uptime VALUES(?,?,?)`, [
+      device,
+      day,
+      uptime_ms || 0,
+    ]);
 
   if (event === "MONTHLY_SYNC")
-    await dbRun(
-      `INSERT OR REPLACE INTO monthly_uptime VALUES(?,?,?)`,
-      [device, month, uptime_ms || 0]
-    );
+    await dbRun(`INSERT OR REPLACE INTO monthly_uptime VALUES(?,?,?)`, [
+      device,
+      month,
+      uptime_ms || 0,
+    ]);
 
-  if (event === "ONLINE" || event === "OFFLINE")
-    broadcast(
-      `${event === "ONLINE" ? "🟢 ONLINE" : "🔴 OFFLINE"}\n${device}\n🕒 ${
-        time || formatTime(now)
-      }`
-    );
+  if (event === "ONLINE" || event === "OFFLINE") {
+    for (const bot of BOTS)
+      if (bot.device === device)
+        broadcast(
+          bot.token,
+          `${event === "ONLINE" ? "🟢 ONLINE" : "🔴 OFFLINE"}\n${device}\n🕒 ${
+            time || formatTime(now)
+          }`
+        );
+  }
 
   res.json({ ok: true });
 });
 
-/* ---------- TELEGRAM BOT ---------- */
-let lastId = 0;
+/* ---------- TELEGRAM POLLING ---------- */
+for (const bot of BOTS) {
+  setInterval(async () => {
+    const r = await fetch(
+      `https://api.telegram.org/bot${bot.token}/getUpdates?offset=${
+        bot.lastId + 1
+      }`
+    )
+      .then((x) => x.json())
+      .catch(() => null);
 
-async function handleTelegramCommand(chat, cmd) {
-  await dbRun(`INSERT OR IGNORE INTO chats VALUES(?)`, [chat]);
+    if (!r?.ok) return;
 
-  if (cmd === "/statusweek") {
-    const rows = await getLastNDays(DEFAULT_DEVICE, 7);
-    const totalUp = rows.reduce((s, r) => s + (r.uptime_ms || 0), 0);
-    const totalP = totalSlaPercent(totalUp, rows.length * DAY_MS);
+    for (const u of r.result) {
+      bot.lastId = u.update_id;
+      const chat = u.message?.chat?.id;
+      const cmd = u.message?.text;
+      if (!chat || !cmd) continue;
 
-    let t =
-      `📈 Last 7 Days SLA\n📟 ${DEFAULT_DEVICE}\n` +
-      `Total Uptime %: ${totalP.toFixed(2)}%\n\n`;
+      await dbRun(
+        `INSERT OR IGNORE INTO chats(chat_id,bot_token) VALUES(?,?)`,
+        [chat, bot.token]
+      );
 
-    for (const r of rows.reverse()) {
-      const p = slaPercent(r.uptime_ms || 0);
-      t += `${epochSecToLabel(r.day)} ${bar(p)} ${p.toFixed(1)}%\n`;
+      if (cmd === "/statusweek") {
+        const rows = await getLastNDays(bot.device, 7);
+        const totalUp = rows.reduce((s, r) => s + (r.uptime_ms || 0), 0);
+        const totalP = totalSlaPercent(totalUp, rows.length * DAY_MS);
+
+        let t =
+          `📈 Last 7 Days SLA\n📟 ${bot.device}\n` +
+          `Total Uptime %: ${totalP.toFixed(2)}%\n\n`;
+
+        for (const r of rows.reverse()) {
+          const p = slaPercent(r.uptime_ms || 0);
+          t += `${epochSecToLabel(r.day)} ${bar(p)} ${p.toFixed(1)}%\n`;
+        }
+        tg(bot.token, chat, t);
+      }
+
+      if (cmd === "/statusmonth") {
+        const rows = await getLastNDays(bot.device, 30);
+        const totalUp = rows.reduce((s, r) => s + (r.uptime_ms || 0), 0);
+        const totalP = totalSlaPercent(totalUp, rows.length * DAY_MS);
+
+        tg(
+          bot.token,
+          chat,
+          `📉 Past 30 Days Summary\n📟 ${bot.device}\n\n` +
+            `Total Uptime %: ${totalP.toFixed(2)}%\n` +
+            `Total Uptime: ${(totalUp / 3600000).toFixed(2)}h`
+        );
+      }
+
+      if (cmd === "/month") {
+        const m = monthStartEpochSec();
+        const r = await getMonthlyUptime(bot.device, m);
+        if (!r) tg(bot.token, chat, "⚠️ No MONTHLY_SYNC yet.");
+        else {
+          const days =
+            Math.floor((Date.now() + TZ_OFFSET_MS - m * 1000) / DAY_MS) + 1;
+          const totalP = totalSlaPercent(r.uptime_ms, days * DAY_MS);
+
+          tg(
+            bot.token,
+            chat,
+            `🗓️ Monthly Summary\n📟 ${bot.device}\n\n` +
+              `Total Uptime %: ${totalP.toFixed(2)}%\n` +
+              `${bar(totalP)}`
+          );
+        }
+      }
     }
-    return tg(chat, t);
-  }
-
-  if (cmd === "/statusmonth") {
-    const rows = await getLastNDays(DEFAULT_DEVICE, 30);
-    const totalUp = rows.reduce((s, r) => s + (r.uptime_ms || 0), 0);
-    const totalP = totalSlaPercent(totalUp, rows.length * DAY_MS);
-
-    return tg(
-      chat,
-      `📉 Past 30 Days Summary\n📟 ${DEFAULT_DEVICE}\n\n` +
-        `Total Uptime %: ${totalP.toFixed(2)}%\n` +
-        `Total Uptime: ${(totalUp / 3600000).toFixed(2)}h\n`
-    );
-  }
-
-  if (cmd === "/month") {
-    const m = monthStartEpochSec();
-    const r = await getMonthlyUptime(DEFAULT_DEVICE, m);
-    if (!r) return tg(chat, "⚠️ No MONTHLY_SYNC yet.");
-
-    const days =
-      Math.floor((Date.now() + TZ_OFFSET_MS - m * 1000) / DAY_MS) + 1;
-    const totalP = totalSlaPercent(r.uptime_ms, days * DAY_MS);
-
-    return tg(
-      chat,
-      `🗓️ Monthly Summary\n📟 ${DEFAULT_DEVICE}\n\n` +
-        `Total Uptime %: ${totalP.toFixed(2)}%\n` +
-        `${bar(totalP)}`
-    );
-  }
+  }, TG_POLL_MS);
 }
-
-setInterval(async () => {
-  if (!TG_BOT_TOKEN) return;
-  const r = await fetch(
-    `https://api.telegram.org/bot${TG_BOT_TOKEN}/getUpdates?offset=${
-      lastId + 1
-    }`
-  ).then((x) => x.json());
-  if (!r?.ok) return;
-
-  for (const u of r.result) {
-    lastId = u.update_id;
-    const chat = u.message?.chat?.id;
-    const cmd = u.message?.text;
-    if (chat && cmd) await handleTelegramCommand(chat, cmd);
-  }
-}, TG_POLL_MS);
 
 /* ---------- SCHEDULER ---------- */
 setInterval(midnightSchedulerTick, MIDNIGHT_CHECK_MS);
