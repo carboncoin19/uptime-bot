@@ -17,7 +17,12 @@ for (let i = 1; i <= 10; i++) {
   const token = process.env[`TG_BOT_TOKEN_${i}`];
   const device = process.env[`TG_BOT_DEVICE_${i}`];
   if (token && device) {
-    BOTS.push({ token, device, lastId: 0 });
+    BOTS.push({
+      token,
+      device,
+      deviceNorm: device.trim().toUpperCase(),
+      lastId: 0,
+    });
   }
 }
 /* ================================= */
@@ -121,7 +126,9 @@ async function broadcast(token, text) {
 app.post("/api/event", async (req, res) => {
   const { device, event, uptime_ms, day, month, time } = req.body;
   const now = Date.now();
+  const devNorm = String(device || "").trim().toUpperCase();
 
+  // update devices table
   if (device) {
     const status = event === "ONLINE" || event === "OFFLINE" ? event : null;
     await dbRun(
@@ -138,6 +145,7 @@ app.post("/api/event", async (req, res) => {
       ]);
   }
 
+  // sync data
   if (event === "DAILY_SYNC")
     await dbRun(`INSERT OR REPLACE INTO daily_uptime VALUES(?,?,?)`, [
       device,
@@ -152,15 +160,18 @@ app.post("/api/event", async (req, res) => {
       uptime_ms || 0,
     ]);
 
+  // ✅ FIXED: robust live alert broadcast
   if (event === "ONLINE" || event === "OFFLINE") {
-    for (const bot of BOTS)
-      if (bot.device === device)
+    for (const bot of BOTS) {
+      if (bot.deviceNorm === devNorm) {
         broadcast(
           bot.token,
           `${event === "ONLINE" ? "🟢 ONLINE" : "🔴 OFFLINE"}\n${device}\n🕒 ${
             time || new Date(now).toLocaleString()
           }`
         );
+      }
+    }
   }
 
   res.json({ ok: true });
@@ -190,18 +201,14 @@ for (const bot of BOTS) {
         [chat, bot.token]
       );
 
-      /* ===== /STATUS (FIXED – SAME AS OLD CODE) ===== */
+      /* ===== /STATUS (YESTERDAY – SAFE MATCH) ===== */
       if (cmd === "/status") {
         const today = todayEpochSec();
-        const yesterday = today - 86400;
-        const yLabel = epochSecToLabel(yesterday);
+        const yLabel = epochSecToLabel(today - 86400);
 
         const rows = await dbAll(
-          `SELECT day,uptime_ms
-           FROM daily_uptime
-           WHERE device=?
-           ORDER BY day DESC
-           LIMIT 7`,
+          `SELECT day,uptime_ms FROM daily_uptime
+           WHERE device=? ORDER BY day DESC LIMIT 7`,
           [bot.device]
         );
 
@@ -296,19 +303,17 @@ for (const bot of BOTS) {
   }, TG_POLL_MS);
 }
 
-/* ---------- 7AM AUTO SUMMARY (FIXED) ---------- */
+/* ---------- 7AM AUTO SUMMARY ---------- */
 let lastSummary = {};
 setInterval(async () => {
-  const today = todayEpochSec();
-  const yesterday = today - 86400;
-  const yLabel = epochSecToLabel(yesterday);
+  const yLabel = epochSecToLabel(todayEpochSec() - 86400);
 
   const now = new Date(Date.now() + TZ_OFFSET_MS);
   const sec = now.getHours() * 3600 + now.getMinutes() * 60;
   if (sec < 25200 || sec > 25800) return;
 
   for (const bot of BOTS) {
-    if (lastSummary[bot.device] === yesterday) continue;
+    if (lastSummary[bot.device] === yLabel) continue;
 
     const rows = await dbAll(
       `SELECT day,uptime_ms FROM daily_uptime
@@ -327,7 +332,7 @@ setInterval(async () => {
           match.day
         )}\nUptime: ${(match.uptime_ms / 3600000).toFixed(2)}h`
       );
-      lastSummary[bot.device] = yesterday;
+      lastSummary[bot.device] = yLabel;
     }
   }
 }, MIDNIGHT_CHECK_MS);
