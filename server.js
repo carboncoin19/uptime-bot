@@ -20,7 +20,7 @@ for (let i = 1; i <= 10; i++) {
   if (token && device) {
     BOTS.push({
       token,
-      device,
+      device: device.trim(),
       deviceNorm: device.trim().toUpperCase(),
       lastId: 0,
     });
@@ -31,6 +31,7 @@ for (let i = 1; i <= 10; i++) {
 /* ---------- ENSURE /data EXISTS ---------- */
 if (!fs.existsSync("/data")) {
   fs.mkdirSync("/data", { recursive: true });
+  console.log("📁 /data ready");
 }
 
 /* ---------- APP ---------- */
@@ -121,7 +122,6 @@ async function broadcast(token, text) {
     [token]
   );
 
-  // 🔥 FIX: warn if no subscribers
   if (!chats.length) {
     console.log("⚠️ No subscribers for bot:", token.slice(0, 10));
     return;
@@ -136,13 +136,16 @@ app.post("/api/event", async (req, res) => {
   const now = Date.now();
   const devNorm = String(device || "").trim().toUpperCase();
 
+  /* 🔥 FIX: status now updates correctly */
   if (device) {
     const status = event === "ONLINE" || event === "OFFLINE" ? event : null;
     await dbRun(
       `INSERT INTO devices(device,last_seen,status)
        VALUES(?,?,?)
        ON CONFLICT(device)
-       DO UPDATE SET last_seen=excluded.last_seen`,
+       DO UPDATE SET
+         last_seen = excluded.last_seen,
+         status    = excluded.status`,
       [device, now, status]
     );
   }
@@ -161,14 +164,10 @@ app.post("/api/event", async (req, res) => {
       uptime_ms || 0,
     ]);
 
-  /* 🔔 LIVE ONLINE / OFFLINE ALERT */
+  /* 🔔 LIVE ONLINE / OFFLINE (transition-safe) */
   if (event === "ONLINE" || event === "OFFLINE") {
     for (const bot of BOTS) {
-      if (
-        devNorm === bot.deviceNorm ||
-        devNorm.includes(bot.deviceNorm) ||
-        bot.deviceNorm.includes(devNorm)
-      ) {
+      if (devNorm === bot.deviceNorm) {
         broadcast(
           bot.token,
           `${event === "ONLINE" ? "🟢 ONLINE" : "🔴 OFFLINE"}\n${device}\n🕒 ${
@@ -201,7 +200,6 @@ for (const bot of BOTS) {
       const cmd = u.message?.text;
       if (!chat || !cmd) continue;
 
-      // 🔥 FIX: AUTO-SUBSCRIBE CHAT
       await dbRun(
         `INSERT OR IGNORE INTO chats(chat_id,bot_token) VALUES(?,?)`,
         [chat, bot.token]
