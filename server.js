@@ -30,32 +30,12 @@ for (let i = 1; i <= 10; i++) {
 
 /* ---------- ENSURE /data EXISTS ---------- */
 if (!fs.existsSync("/data")) {
-  try {
-    fs.mkdirSync("/data", { recursive: true });
-    console.log("📁 /data directory ready");
-  } catch (e) {
-    console.log("❌ Failed to create /data:", e.message);
-  }
+  fs.mkdirSync("/data", { recursive: true });
 }
 
+/* ---------- APP ---------- */
 const app = express();
 app.use(express.json());
-
-/* ---------- DEBUG ENDPOINT (TEMPORARY) ---------- */
-app.get("/debug/fs", (req, res) => {
-  let root, data;
-  try {
-    root = fs.readdirSync("/");
-  } catch (e) {
-    root = { error: e.message };
-  }
-  try {
-    data = fs.readdirSync("/data");
-  } catch (e) {
-    data = { error: e.message };
-  }
-  res.json({ root, data });
-});
 
 /* ---------- SQLITE ---------- */
 const db = new sqlite3.Database(DB_FILE, (err) => {
@@ -108,13 +88,6 @@ const todayEpochSec = () => {
   return Math.floor(d.getTime() / 1000);
 };
 
-const monthStartEpochSec = () => {
-  const d = new Date(Date.now() + TZ_OFFSET_MS);
-  d.setDate(1);
-  d.setHours(0, 0, 0, 0);
-  return Math.floor(d.getTime() / 1000);
-};
-
 const epochSecToLabel = (s) =>
   new Date(s * 1000 + TZ_OFFSET_MS).toLocaleDateString("en-US", {
     month: "short",
@@ -147,6 +120,13 @@ async function broadcast(token, text) {
     `SELECT chat_id FROM chats WHERE bot_token=?`,
     [token]
   );
+
+  // 🔥 FIX: warn if no subscribers
+  if (!chats.length) {
+    console.log("⚠️ No subscribers for bot:", token.slice(0, 10));
+    return;
+  }
+
   for (const c of chats) tg(token, c.chat_id, text);
 }
 
@@ -165,11 +145,6 @@ app.post("/api/event", async (req, res) => {
        DO UPDATE SET last_seen=excluded.last_seen`,
       [device, now, status]
     );
-    if (status)
-      await dbRun(`UPDATE devices SET status=? WHERE device=?`, [
-        status,
-        device,
-      ]);
   }
 
   if (event === "DAILY_SYNC")
@@ -186,9 +161,11 @@ app.post("/api/event", async (req, res) => {
       uptime_ms || 0,
     ]);
 
+  /* 🔔 LIVE ONLINE / OFFLINE ALERT */
   if (event === "ONLINE" || event === "OFFLINE") {
     for (const bot of BOTS) {
       if (
+        devNorm === bot.deviceNorm ||
         devNorm.includes(bot.deviceNorm) ||
         bot.deviceNorm.includes(devNorm)
       ) {
@@ -224,10 +201,19 @@ for (const bot of BOTS) {
       const cmd = u.message?.text;
       if (!chat || !cmd) continue;
 
+      // 🔥 FIX: AUTO-SUBSCRIBE CHAT
       await dbRun(
         `INSERT OR IGNORE INTO chats(chat_id,bot_token) VALUES(?,?)`,
         [chat, bot.token]
       );
+
+      if (cmd === "/start") {
+        tg(
+          bot.token,
+          chat,
+          `📡 ${bot.device} uptime monitor active.\nYou will now receive live alerts.`
+        );
+      }
 
       if (cmd === "/status") {
         const today = todayEpochSec();
