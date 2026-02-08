@@ -208,10 +208,10 @@ for (const bot of BOTS) {
       if (cmd === "/start")
         tg(bot.token, chat, `📡 ${bot.device} uptime monitor active.`);
 
-      /* ✅ FIXED /status */
+      /* /status */
       if (cmd === "/status") {
         const today = todayEpochSec();
-        const yesterdayLabel = epochSecToLabel(today - 86400);
+        const yLabel = epochSecToLabel(today - 86400);
 
         const rows = await dbAll(
           `SELECT day,uptime_ms FROM daily_uptime
@@ -224,9 +224,7 @@ for (const bot of BOTS) {
           [bot.device]
         );
 
-        const match = rows.find(r =>
-          epochSecToLabel(r.day) === yesterdayLabel
-        );
+        const match = rows.find(r => epochSecToLabel(r.day) === yLabel);
 
         if (!match)
           return tg(
@@ -240,33 +238,66 @@ for (const bot of BOTS) {
             title: "Yesterday SLA (24h)",
             device: bot.device,
             status: computeLiveStatus(devRow),
-            label: yesterdayLabel,
+            label: yLabel,
             uptimeMs: match.uptime_ms
           })
         );
       }
 
+      /* ✅ FIXED /statusweek (overall SLA added) */
       if (cmd === "/statusweek") {
         const rows = await dbAll(
-          `SELECT day,uptime_ms FROM daily_uptime WHERE device=? ORDER BY day DESC LIMIT 7`,
+          `SELECT day,uptime_ms FROM daily_uptime
+           WHERE device=? ORDER BY day DESC LIMIT 7`,
           [bot.device]
         );
-        let t = `📈 Last 7 Days SLA\n📟 ${bot.device}\n\n`;
-        for (const r of rows.reverse()) {
+
+        if (!rows.length)
+          return tg(bot.token, chat, "⚠️ No uptime data yet.");
+
+        const ordered = rows.reverse();
+        const totalUp = ordered.reduce((s, r) => s + (r.uptime_ms || 0), 0);
+        const expected = ordered.length * DAY_MS;
+        const overall = Math.min(100, (totalUp / expected) * 100);
+
+        let t =
+          `📈 Weekly SLA Summary\n` +
+          `📟 ${bot.device}\n\n` +
+          `Overall SLA: ${overall.toFixed(2)}%\n` +
+          `Total Uptime: ${(totalUp / 3600000).toFixed(2)}h\n\n`;
+
+        for (const r of ordered) {
           const p = slaPercent(r.uptime_ms || 0);
           t += `${epochSecToLabel(r.day)} ${bar(p)} ${p.toFixed(1)}%\n`;
         }
+
         tg(bot.token, chat, t);
       }
 
+      /* ✅ FIXED /statusmonth (overall SLA added) */
       if (cmd === "/statusmonth") {
         const rows = await dbAll(
-          `SELECT uptime_ms FROM daily_uptime WHERE device=? ORDER BY day DESC LIMIT 30`,
+          `SELECT day,uptime_ms FROM daily_uptime
+           WHERE device=? ORDER BY day DESC LIMIT 30`,
           [bot.device]
         );
-        const total = rows.reduce((s, r) => s + (r.uptime_ms || 0), 0);
-        tg(bot.token, chat,
-          `📉 Past 30 Days\n📟 ${bot.device}\nUptime: ${(total / 3600000).toFixed(2)}h`);
+
+        if (!rows.length)
+          return tg(bot.token, chat, "⚠️ No uptime data yet.");
+
+        const totalUp = rows.reduce((s, r) => s + (r.uptime_ms || 0), 0);
+        const expected = rows.length * DAY_MS;
+        const sla = Math.min(100, (totalUp / expected) * 100);
+
+        tg(
+          bot.token,
+          chat,
+          `📉 Monthly SLA Summary\n` +
+          `📟 ${bot.device}\n\n` +
+          `Overall SLA: ${sla.toFixed(2)}%\n` +
+          `Total Uptime: ${(totalUp / 3600000).toFixed(2)}h\n` +
+          `Days counted: ${rows.length}`
+        );
       }
 
       if (cmd === "/month") {
@@ -283,44 +314,43 @@ for (const bot of BOTS) {
   }, TG_POLL_MS);
 }
 
-/* ---------- AUTO DAILY / WEEKLY / MONTHLY SLA ---------- */
+/* ---------- AUTO DAILY SLA ---------- */
 let sent = {};
-
 setInterval(async () => {
   const now = new Date(Date.now() + TZ_OFFSET_MS);
   const sec = now.getHours() * 3600 + now.getMinutes() * 60;
 
+  if (sec < 25200 || sec > 25800) return;
+
   for (const bot of BOTS) {
+    const yLabel = epochSecToLabel(todayEpochSec() - 86400);
+    if (sent[bot.device] === yLabel) continue;
+
+    const rows = await dbAll(
+      `SELECT day,uptime_ms FROM daily_uptime
+       WHERE device=? ORDER BY day DESC LIMIT 7`,
+      [bot.device]
+    );
+    const match = rows.find(r => epochSecToLabel(r.day) === yLabel);
+    if (!match) continue;
+
     const devRow = await dbGet(
       `SELECT last_seen,status FROM devices WHERE device=?`,
       [bot.device]
     );
-    const status = computeLiveStatus(devRow);
 
-    /* DAILY */
-    if (sec >= 25200 && sec <= 25800) {
-      const yLabel = epochSecToLabel(todayEpochSec() - 86400);
-      if (sent[bot.device]?.daily === yLabel) continue;
+    broadcast(
+      bot.token,
+      buildSlaMessage({
+        title: "Yesterday SLA (24h)",
+        device: bot.device,
+        status: computeLiveStatus(devRow),
+        label: yLabel,
+        uptimeMs: match.uptime_ms
+      })
+    );
 
-      const rows = await dbAll(
-        `SELECT day,uptime_ms FROM daily_uptime WHERE device=? ORDER BY day DESC LIMIT 7`,
-        [bot.device]
-      );
-      const match = rows.find(r => epochSecToLabel(r.day) === yLabel);
-      if (!match) continue;
-
-      broadcast(bot.token,
-        buildSlaMessage({
-          title: "Yesterday SLA (24h)",
-          device: bot.device,
-          status,
-          label: yLabel,
-          uptimeMs: match.uptime_ms
-        })
-      );
-
-      sent[bot.device] = { ...(sent[bot.device] || {}), daily: yLabel };
-    }
+    sent[bot.device] = yLabel;
   }
 }, MIDNIGHT_CHECK_MS);
 
