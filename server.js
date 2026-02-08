@@ -139,14 +139,18 @@ async function broadcast(token, text) {
     `SELECT chat_id FROM chats WHERE bot_token=?`,
     [token]
   );
+
   if (!chats.length) {
     console.log("⚠️ No subscribers for bot:", token.slice(0, 10));
     return;
   }
+
   for (const c of chats) tg(token, c.chat_id, text);
 }
 
-/* ---------- DEBUG ENDPOINTS ---------- */
+/* ---------- DEBUG / MIGRATION ENDPOINTS ---------- */
+
+// inspect data
 app.get("/debug/chats", async (_, res) => {
   res.json(await dbAll(`SELECT * FROM chats`));
 });
@@ -165,9 +169,17 @@ app.get("/debug/bots", (_, res) => {
   );
 });
 
-app.post("/debug/clear-chats", async (_, res) => {
-  await dbRun(`DELETE FROM chats`);
-  res.json({ ok: true });
+// 🔥 FIX: reset broken single-bot schema safely
+app.post("/debug/reset-chats-table", async (_, res) => {
+  await dbRun(`DROP TABLE IF EXISTS chats`);
+  await dbRun(`
+    CREATE TABLE chats(
+      chat_id INTEGER,
+      bot_token TEXT,
+      PRIMARY KEY(chat_id, bot_token)
+    )
+  `);
+  res.json({ ok: true, reset: true });
 });
 
 /* ---------- EVENT API ---------- */
@@ -254,9 +266,7 @@ for (const bot of BOTS) {
         );
       }
 
-      if (cmd === "/ping") {
-        tg(bot.token, chat, "✅ Bot is alive.");
-      }
+      if (cmd === "/ping") tg(bot.token, chat, "✅ Bot is alive.");
 
       if (cmd === "/devices") {
         const rows = await dbAll(`SELECT * FROM devices ORDER BY device`);
@@ -281,6 +291,7 @@ for (const bot of BOTS) {
           `SELECT last_seen,status FROM devices WHERE device=?`,
           [bot.device]
         );
+
         const live = computeLiveStatus(devRow);
         const label = epochSecToLabel(yesterday);
         const match = rows.find(r => epochSecToLabel(r.day) === label);
