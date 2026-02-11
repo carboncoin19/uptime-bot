@@ -37,6 +37,11 @@ if (!fs.existsSync("/data")) fs.mkdirSync("/data", { recursive: true });
 const app = express();
 app.use(express.json());
 
+/* ---------- HEALTH CHECK (RAILWAY FIX) ---------- */
+app.get("/", (req, res) => {
+  res.status(200).send("OK");
+});
+
 /* ---------- SQLITE ---------- */
 const db = new sqlite3.Database(DB_FILE, err => {
   if (err) console.log("❌ DB error:", err.message);
@@ -139,7 +144,10 @@ async function tg(token, chat, text) {
 }
 
 async function broadcast(token, text) {
-  const chats = await dbAll(`SELECT chat_id FROM chats WHERE bot_token=?`, [token]);
+  const chats = await dbAll(
+    `SELECT chat_id FROM chats WHERE bot_token=?`,
+    [token]
+  );
   for (const c of chats) tg(token, c.chat_id, text);
 }
 
@@ -153,7 +161,9 @@ app.post("/api/event", async (req, res) => {
   if (event === "HEARTBEAT") return res.json({ ok: true });
 
   if (dev) {
-    const status = (event === "ONLINE" || event === "OFFLINE") ? event : null;
+    const status =
+      event === "ONLINE" || event === "OFFLINE" ? event : null;
+
     await dbRun(
       `INSERT INTO devices(device,last_seen,status)
        VALUES(?,?,?)
@@ -161,22 +171,31 @@ app.post("/api/event", async (req, res) => {
        DO UPDATE SET last_seen=excluded.last_seen`,
       [dev, now, status]
     );
+
     if (status)
-      await dbRun(`UPDATE devices SET status=? WHERE device=?`, [status, dev]);
+      await dbRun(
+        `UPDATE devices SET status=? WHERE device=?`,
+        [status, dev]
+      );
   }
 
   if (event === "DAILY_SYNC")
-    await dbRun(`INSERT OR REPLACE INTO daily_uptime VALUES(?,?,?)`,
-      [dev, day, uptime_ms || 0]);
+    await dbRun(
+      `INSERT OR REPLACE INTO daily_uptime VALUES(?,?,?)`,
+      [dev, day, uptime_ms || 0]
+    );
 
   if (event === "MONTHLY_SYNC")
-    await dbRun(`INSERT OR REPLACE INTO monthly_uptime VALUES(?,?,?)`,
-      [dev, month, uptime_ms || 0]);
+    await dbRun(
+      `INSERT OR REPLACE INTO monthly_uptime VALUES(?,?,?)`,
+      [dev, month, uptime_ms || 0]
+    );
 
   if (event === "ONLINE" || event === "OFFLINE") {
     const msg =
       `${event === "ONLINE" ? "🟢 ONLINE" : "🔴 OFFLINE"}\n` +
       `${dev}\n🕒 ${time || formatTime(now)}`;
+
     for (const bot of BOTS)
       if (bot.deviceNorm === devNorm)
         broadcast(bot.token, msg);
@@ -190,7 +209,9 @@ for (const bot of BOTS) {
   setInterval(async () => {
     const r = await fetch(
       `https://api.telegram.org/bot${bot.token}/getUpdates?offset=${bot.lastId + 1}`
-    ).then(x => x.json()).catch(() => null);
+    )
+      .then(x => x.json())
+      .catch(() => null);
 
     if (!r?.ok) return;
 
@@ -208,7 +229,6 @@ for (const bot of BOTS) {
       if (cmd === "/start")
         tg(bot.token, chat, `📡 ${bot.device} uptime monitor active.`);
 
-      /* /status */
       if (cmd === "/status") {
         const today = todayEpochSec();
         const yLabel = epochSecToLabel(today - 86400);
@@ -224,7 +244,9 @@ for (const bot of BOTS) {
           [bot.device]
         );
 
-        const match = rows.find(r => epochSecToLabel(r.day) === yLabel);
+        const match = rows.find(
+          r => epochSecToLabel(r.day) === yLabel
+        );
 
         if (!match)
           return tg(
@@ -233,18 +255,19 @@ for (const bot of BOTS) {
             `⚠️ No DAILY_SYNC for yesterday\n📟 ${bot.device}\n📡 Status: ${computeLiveStatus(devRow)}`
           );
 
-        tg(bot.token, chat,
+        tg(
+          bot.token,
+          chat,
           buildSlaMessage({
             title: "Yesterday SLA (24h)",
             device: bot.device,
             status: computeLiveStatus(devRow),
             label: yLabel,
-            uptimeMs: match.uptime_ms
+            uptimeMs: match.uptime_ms,
           })
         );
       }
 
-      /* ✅ FIXED /statusweek (overall SLA added) */
       if (cmd === "/statusweek") {
         const rows = await dbAll(
           `SELECT day,uptime_ms FROM daily_uptime
@@ -256,9 +279,15 @@ for (const bot of BOTS) {
           return tg(bot.token, chat, "⚠️ No uptime data yet.");
 
         const ordered = rows.reverse();
-        const totalUp = ordered.reduce((s, r) => s + (r.uptime_ms || 0), 0);
+        const totalUp = ordered.reduce(
+          (s, r) => s + (r.uptime_ms || 0),
+          0
+        );
         const expected = ordered.length * DAY_MS;
-        const overall = Math.min(100, (totalUp / expected) * 100);
+        const overall = Math.min(
+          100,
+          (totalUp / expected) * 100
+        );
 
         let t =
           `📈 Weekly SLA Summary\n` +
@@ -274,7 +303,6 @@ for (const bot of BOTS) {
         tg(bot.token, chat, t);
       }
 
-      /* ✅ FIXED /statusmonth (overall SLA added) */
       if (cmd === "/statusmonth") {
         const rows = await dbAll(
           `SELECT day,uptime_ms FROM daily_uptime
@@ -285,18 +313,24 @@ for (const bot of BOTS) {
         if (!rows.length)
           return tg(bot.token, chat, "⚠️ No uptime data yet.");
 
-        const totalUp = rows.reduce((s, r) => s + (r.uptime_ms || 0), 0);
+        const totalUp = rows.reduce(
+          (s, r) => s + (r.uptime_ms || 0),
+          0
+        );
         const expected = rows.length * DAY_MS;
-        const sla = Math.min(100, (totalUp / expected) * 100);
+        const sla = Math.min(
+          100,
+          (totalUp / expected) * 100
+        );
 
         tg(
           bot.token,
           chat,
           `📉 Monthly SLA Summary\n` +
-          `📟 ${bot.device}\n\n` +
-          `Overall SLA: ${sla.toFixed(2)}%\n` +
-          `Total Uptime: ${(totalUp / 3600000).toFixed(2)}h\n` +
-          `Days counted: ${rows.length}`
+            `📟 ${bot.device}\n\n` +
+            `Overall SLA: ${sla.toFixed(2)}%\n` +
+            `Total Uptime: ${(totalUp / 3600000).toFixed(2)}h\n` +
+            `Days counted: ${rows.length}`
         );
       }
 
@@ -306,9 +340,14 @@ for (const bot of BOTS) {
           `SELECT uptime_ms FROM monthly_uptime WHERE device=? AND month=?`,
           [bot.device, m]
         );
-        if (!r) tg(bot.token, chat, "⚠️ No MONTHLY_SYNC yet.");
-        else tg(bot.token, chat,
-          `🗓️ Monthly Summary\n📟 ${bot.device}\nUptime: ${(r.uptime_ms / 3600000).toFixed(2)}h`);
+        if (!r)
+          tg(bot.token, chat, "⚠️ No MONTHLY_SYNC yet.");
+        else
+          tg(
+            bot.token,
+            chat,
+            `🗓️ Monthly Summary\n📟 ${bot.device}\nUptime: ${(r.uptime_ms / 3600000).toFixed(2)}h`
+          );
       }
     }
   }, TG_POLL_MS);
@@ -331,7 +370,10 @@ setInterval(async () => {
        WHERE device=? ORDER BY day DESC LIMIT 7`,
       [bot.device]
     );
-    const match = rows.find(r => epochSecToLabel(r.day) === yLabel);
+
+    const match = rows.find(
+      r => epochSecToLabel(r.day) === yLabel
+    );
     if (!match) continue;
 
     const devRow = await dbGet(
@@ -346,7 +388,7 @@ setInterval(async () => {
         device: bot.device,
         status: computeLiveStatus(devRow),
         label: yLabel,
-        uptimeMs: match.uptime_ms
+        uptimeMs: match.uptime_ms,
       })
     );
 
@@ -356,9 +398,6 @@ setInterval(async () => {
 
 /* ---------- START ---------- */
 const LISTEN_PORT = process.env.PORT || 8080;
-
 app.listen(LISTEN_PORT, "0.0.0.0", () => {
   console.log("🚀 Server running on", LISTEN_PORT);
 });
-
-
