@@ -355,4 +355,10 @@ setInterval(async () => {
 }, MIDNIGHT_CHECK_MS);
 
 /* ---------- START ---------- */
-app.listen(PORT, () => console.log("🚀 Server running on", PORT));
+const LISTEN_PORT = process.env.PORT || 8080;
+
+app.listen(LISTEN_PORT, "0.0.0.0", () => {
+  console.log("🚀 Server running on", LISTEN_PORT);
+});
+
+
