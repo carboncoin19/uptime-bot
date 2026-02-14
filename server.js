@@ -72,11 +72,15 @@ db.serialize(() => {
     uptime_ms INTEGER,
     PRIMARY KEY(device,month)
   )`);
-    db.run(`CREATE TABLE IF NOT EXISTS firmware_control(
-    device TEXT PRIMARY KEY,
-    latest_version TEXT,
-    update_requested INTEGER DEFAULT 0
-  )`);
+   db.run(`CREATE TABLE IF NOT EXISTS firmware_control(
+  device TEXT PRIMARY KEY,
+  latest_version TEXT,
+  firmware_url TEXT,
+  update_requested INTEGER DEFAULT 0,
+  force_update INTEGER DEFAULT 0,
+  current_version TEXT
+)`);
+
 
 });
 
@@ -214,12 +218,11 @@ if (event === "OTA_SUCCESS") {
   await dbRun(
     `UPDATE firmware_control
      SET update_requested=0,
-         latest_version=?
+         force_update=0,
+         current_version=?
      WHERE device=?`,
-   [version || "unknown", dev]
-
+    [version || "unknown", dev]
   );
-
 
   const msg =
     `🚀 OTA UPDATE SUCCESS\n\n` +
@@ -231,6 +234,7 @@ if (event === "OTA_SUCCESS") {
     if (bot.deviceNorm === devNorm)
       broadcast(bot.token, msg);
 }
+
 
 
   /* OTA FAILED */
@@ -251,25 +255,36 @@ if (event === "OTA_SUCCESS") {
 
 app.get("/api/fw/:device", async (req, res) => {
 
- const dev = req.params.device.trim().toUpperCase();
-
+  const dev = req.params.device.trim().toUpperCase();
 
   const row = await dbGet(
-    `SELECT latest_version, update_requested
-     FROM firmware_control WHERE device=?`,
+    `SELECT latest_version, firmware_url,
+            update_requested, force_update
+     FROM firmware_control
+     WHERE device=?`,
     [dev]
   );
 
-  if (!row) {
+  if (!row || row.update_requested !== 1) {
     return res.json({ update: false });
   }
 
+  // Reset update flag immediately
+  await dbRun(
+    `UPDATE firmware_control
+     SET update_requested=0
+     WHERE device=?`,
+    [dev]
+  );
+
   res.json({
-    update: row.update_requested === 1,
+    update: true,
     version: row.latest_version,
-    url: "https://github.com/carboncoin19/esp32-uptime-ota/releases/latest/download/firmware.bin"
+    url: row.firmware_url,
+    force: row.force_update === 1
   });
 });
+
 
 /* ---------- TELEGRAM LONG POLLING ---------- */
 
@@ -300,6 +315,71 @@ function startLongPolling(bot) {
         );
 
         /* ===== COMMAND HANDLERS ===== */
+if (cmd.startsWith("/update")) {
+
+  const parts = cmd.split(" ");
+  if (parts.length < 2) {
+    return tg(bot.token, chat, "Usage: /update 1.0.4");
+  }
+
+  const newVersion = parts[1];
+
+  await dbRun(
+    `INSERT INTO firmware_control
+     (device, latest_version, firmware_url,
+      update_requested, force_update)
+     VALUES(?,?,?,?,0)
+     ON CONFLICT(device)
+     DO UPDATE SET
+       latest_version=?,
+       update_requested=1,
+       force_update=0`,
+    [
+      bot.device.toUpperCase(),
+      newVersion,
+      "https://github.com/carboncoin19/esp32-uptime-ota/releases/latest/download/firmware.bin",
+      1,
+      newVersion
+    ]
+  );
+
+  tg(bot.token, chat,
+    `🚀 Update requested\n📟 ${bot.device}\n🆕 ${newVersion}`
+  );
+}
+        if (cmd.startsWith("/forceupdate")) {
+
+  const parts = cmd.split(" ");
+  if (parts.length < 2) {
+    return tg(bot.token, chat, "Usage: /forceupdate 1.0.4");
+  }
+
+  const newVersion = parts[1];
+
+  await dbRun(
+    `INSERT INTO firmware_control
+     (device, latest_version, firmware_url,
+      update_requested, force_update)
+     VALUES(?,?,?,?,1)
+     ON CONFLICT(device)
+     DO UPDATE SET
+       latest_version=?,
+       update_requested=1,
+       force_update=1`,
+    [
+      bot.device.toUpperCase(),
+      newVersion,
+      "https://github.com/carboncoin19/esp32-uptime-ota/releases/latest/download/firmware.bin",
+      1,
+      newVersion
+    ]
+  );
+
+  tg(bot.token, chat,
+    `🔥 FORCE UPDATE requested\n📟 ${bot.device}\n🆕 ${newVersion}`
+  );
+}
+
 
         if (cmd === "/start") {
           tg(bot.token, chat, `📡 ${bot.device} uptime monitor active.`);
@@ -344,42 +424,21 @@ function startLongPolling(bot) {
             })
           );
         }
-        if (cmd === "/fw") {
+       if (cmd === "/fw") {
 
   const row = await dbGet(
-    `SELECT latest_version FROM firmware_control WHERE device=?`,
-   [bot.device.toUpperCase()]
-
+    `SELECT current_version, latest_version
+     FROM firmware_control
+     WHERE device=?`,
+    [bot.device.toUpperCase()]
   );
 
-  tg(bot.token, chat,
+  tg(
+    bot.token,
+    chat,
     `📟 ${bot.device}\n` +
-    `Latest server version: ${row?.latest_version || "Not set"}`
-  );
-}
-if (cmd.startsWith("/update")) {
-
-  const parts = cmd.split(" ");
-
-  if (parts.length < 2) {
-    return tg(bot.token, chat, "Usage: /update 1.0.4");
-  }
-
-  const newVersion = parts[1];
-
-  await dbRun(
-    `INSERT INTO firmware_control(device,latest_version,update_requested)
-     VALUES(?,?,1)
-     ON CONFLICT(device)
-     DO UPDATE SET latest_version=?, update_requested=1`,
-    [bot.device.toUpperCase(), newVersion, newVersion]
-
-  );
-
-  tg(bot.token, chat,
-    `🚀 Update command sent\n` +
-    `📟 ${bot.device}\n` +
-    `🆕 Target version: ${newVersion}`
+    `Current Device Version: ${row?.current_version || "Unknown"}\n` +
+    `Latest Server Version: ${row?.latest_version || "Not set"}`
   );
 }
 
@@ -533,4 +592,5 @@ setInterval(async () => {
 app.listen(PORT, "0.0.0.0", () => {
   console.log("🚀 Server running on port", PORT);
 });
+
 
