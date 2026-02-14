@@ -72,6 +72,12 @@ db.serialize(() => {
     uptime_ms INTEGER,
     PRIMARY KEY(device,month)
   )`);
+    db.run(`CREATE TABLE IF NOT EXISTS firmware_control(
+    device TEXT PRIMARY KEY,
+    latest_version TEXT,
+    update_requested INTEGER DEFAULT 0
+  )`);
+
 });
 
 /* ---------- DB HELPERS ---------- */
@@ -149,8 +155,9 @@ async function broadcast(token, text) {
 app.post("/api/event", async (req, res) => {
   const { device, event, uptime_ms, day, month, time, version } = req.body;
   const now = Date.now();
-  const dev = String(device || "").trim();
-  const devNorm = dev.toUpperCase();
+const dev = String(device || "").trim().toUpperCase();
+const devNorm = dev;
+
 
   if (!event) return res.json({ ok: true });
 
@@ -202,17 +209,29 @@ app.post("/api/event", async (req, res) => {
   }
 
   /* OTA SUCCESS */
-  if (event === "OTA_SUCCESS") {
-    const msg =
-      `🚀 OTA UPDATE SUCCESS\n\n` +
-      `📟 ${dev}\n` +
-      `🆕 Version: ${version || "unknown"}\n` +
-      `🕒 ${time || formatTime(now)}`;
+if (event === "OTA_SUCCESS") {
 
-    for (const bot of BOTS)
-      if (bot.deviceNorm === devNorm)
-        broadcast(bot.token, msg);
-  }
+  await dbRun(
+    `UPDATE firmware_control
+     SET update_requested=0,
+         latest_version=?
+     WHERE device=?`,
+   [version || "unknown", dev]
+
+  );
+
+
+  const msg =
+    `🚀 OTA UPDATE SUCCESS\n\n` +
+    `📟 ${dev}\n` +
+    `🆕 Version: ${version || "unknown"}\n` +
+    `🕒 ${time || formatTime(now)}`;
+
+  for (const bot of BOTS)
+    if (bot.deviceNorm === devNorm)
+      broadcast(bot.token, msg);
+}
+
 
   /* OTA FAILED */
   if (event === "OTA_FAILED") {
@@ -230,6 +249,27 @@ app.post("/api/event", async (req, res) => {
   res.json({ ok: true });
 });
 
+app.get("/api/fw/:device", async (req, res) => {
+
+ const dev = req.params.device.trim().toUpperCase();
+
+
+  const row = await dbGet(
+    `SELECT latest_version, update_requested
+     FROM firmware_control WHERE device=?`,
+    [dev]
+  );
+
+  if (!row) {
+    return res.json({ update: false });
+  }
+
+  res.json({
+    update: row.update_requested === 1,
+    version: row.latest_version,
+    url: "https://github.com/carboncoin19/esp32-uptime-ota/releases/latest/download/firmware.bin"
+  });
+});
 
 /* ---------- TELEGRAM LONG POLLING ---------- */
 
@@ -304,6 +344,44 @@ function startLongPolling(bot) {
             })
           );
         }
+        if (cmd === "/fw") {
+
+  const row = await dbGet(
+    `SELECT latest_version FROM firmware_control WHERE device=?`,
+   [bot.device.toUpperCase()]
+
+  );
+
+  tg(bot.token, chat,
+    `📟 ${bot.device}\n` +
+    `Latest server version: ${row?.latest_version || "Not set"}`
+  );
+}
+if (cmd.startsWith("/update")) {
+
+  const parts = cmd.split(" ");
+
+  if (parts.length < 2) {
+    return tg(bot.token, chat, "Usage: /update 1.0.4");
+  }
+
+  const newVersion = parts[1];
+
+  await dbRun(
+    `INSERT INTO firmware_control(device,latest_version,update_requested)
+     VALUES(?,?,1)
+     ON CONFLICT(device)
+     DO UPDATE SET latest_version=?, update_requested=1`,
+    [bot.device.toUpperCase(), newVersion, newVersion]
+
+  );
+
+  tg(bot.token, chat,
+    `🚀 Update command sent\n` +
+    `📟 ${bot.device}\n` +
+    `🆕 Target version: ${newVersion}`
+  );
+}
 
         if (cmd === "/statusweek") {
           const rows = await dbAll(
@@ -455,3 +533,4 @@ setInterval(async () => {
 app.listen(PORT, "0.0.0.0", () => {
   console.log("🚀 Server running on port", PORT);
 });
+
