@@ -295,23 +295,23 @@ app.get("/api/fw/:device", async (req, res) => {
 /* ---------- TELEGRAM LONG POLLING ---------- */
 
 function startLongPolling(bot) {
-
   async function poll() {
     try {
-
       const response = await fetch(
         `https://api.telegram.org/bot${bot.token}/getUpdates?offset=${bot.lastId + 1}&timeout=30`
       );
-
       const data = await response.json();
-      if (!data.ok) return setTimeout(poll, 1000);
+
+      if (!data.ok) {
+        scheduleNext(1000);
+        return;
+      }
 
       for (const update of data.result) {
-
         bot.lastId = update.update_id;
 
         const chat = update.message?.chat?.id;
-        const cmd  = update.message?.text;
+        const cmd = update.message?.text;
 
         if (!chat || !cmd) continue;
 
@@ -321,71 +321,55 @@ function startLongPolling(bot) {
         );
 
         /* ===== COMMAND HANDLERS ===== */
-if (cmd.startsWith("/update")) {
+        if (cmd.startsWith("/update")) {
+          const parts = cmd.split(" ");
+          if (parts.length < 2) {
+            tg(bot.token, chat, "Usage: /update 1.0.4");
+            continue;
+          }
 
-  const parts = cmd.split(" ");
-  if (parts.length < 2) {
-    return tg(bot.token, chat, "Usage: /update 1.0.4");
-  }
+          const newVersion = parts[1];
+          const fwUrl = "https://github.com/carboncoin19/esp32-uptime-ota/releases/latest/download/firmware.bin";
 
-  const newVersion = parts[1];
+          await dbRun(
+            `INSERT INTO firmware_control
+             (device, latest_version, firmware_url, update_requested, force_update)
+             VALUES(?,?,?,?,0)
+             ON CONFLICT(device)
+             DO UPDATE SET
+               latest_version=?,
+               update_requested=1,
+               force_update=0`,
+            [bot.device.toUpperCase(), newVersion, fwUrl, 1, newVersion]
+          );
 
-  await dbRun(
-    `INSERT INTO firmware_control
-     (device, latest_version, firmware_url,
-      update_requested, force_update)
-     VALUES(?,?,?,?,0)
-     ON CONFLICT(device)
-     DO UPDATE SET
-       latest_version=?,
-       update_requested=1,
-       force_update=0`,
-    [
-      bot.device.toUpperCase(),
-      newVersion,
-      "https://github.com/carboncoin19/esp32-uptime-ota/releases/latest/download/firmware.bin",
-      1,
-      newVersion
-    ]
-  );
+          tg(bot.token, chat, `🚀 Update requested\n📟 ${bot.device}\n🆕 ${newVersion}`);
+        }
 
-  tg(bot.token, chat,
-    `🚀 Update requested\n📟 ${bot.device}\n🆕 ${newVersion}`
-  );
-}
         if (cmd.startsWith("/forceupdate")) {
+          const parts = cmd.split(" ");
+          if (parts.length < 2) {
+            tg(bot.token, chat, "Usage: /forceupdate 1.0.4");
+            continue;
+          }
 
-  const parts = cmd.split(" ");
-  if (parts.length < 2) {
-    return tg(bot.token, chat, "Usage: /forceupdate 1.0.4");
-  }
+          const newVersion = parts[1];
+          const fwUrl = "https://github.com/carboncoin19/esp32-uptime-ota/releases/latest/download/firmware.bin";
 
-  const newVersion = parts[1];
+          await dbRun(
+            `INSERT INTO firmware_control
+             (device, latest_version, firmware_url, update_requested, force_update)
+             VALUES(?,?,?,?,1)
+             ON CONFLICT(device)
+             DO UPDATE SET
+               latest_version=?,
+               update_requested=1,
+               force_update=1`,
+            [bot.device.toUpperCase(), newVersion, fwUrl, 1, newVersion]
+          );
 
-  await dbRun(
-    `INSERT INTO firmware_control
-     (device, latest_version, firmware_url,
-      update_requested, force_update)
-     VALUES(?,?,?,?,1)
-     ON CONFLICT(device)
-     DO UPDATE SET
-       latest_version=?,
-       update_requested=1,
-       force_update=1`,
-    [
-      bot.device.toUpperCase(),
-      newVersion,
-      "https://github.com/carboncoin19/esp32-uptime-ota/releases/latest/download/firmware.bin",
-      1,
-      newVersion
-    ]
-  );
-
-  tg(bot.token, chat,
-    `🔥 FORCE UPDATE requested\n📟 ${bot.device}\n🆕 ${newVersion}`
-  );
-}
-
+          tg(bot.token, chat, `🔥 FORCE UPDATE requested\n📟 ${bot.device}\n🆕 ${newVersion}`);
+        }
 
         if (cmd === "/start") {
           tg(bot.token, chat, `📡 ${bot.device} uptime monitor active.`);
@@ -396,151 +380,116 @@ if (cmd.startsWith("/update")) {
           const yLabel = epochSecToLabel(today - 86400);
 
           const rows = await dbAll(
-            `SELECT day,uptime_ms FROM daily_uptime
-             WHERE device=? ORDER BY day DESC LIMIT 7`,
-            [bot.device]
+            `SELECT day,uptime_ms FROM daily_uptime WHERE device=? ORDER BY day DESC LIMIT 7`,
+            [bot.device.toUpperCase()]
           );
 
           const devRow = await dbGet(
             `SELECT last_seen,status FROM devices WHERE device=?`,
-            [bot.device]
+            [bot.device.toUpperCase()]
           );
 
-          const match = rows.find(
-            r => epochSecToLabel(r.day) === yLabel
-          );
+          const match = rows.find(r => epochSecToLabel(r.day) === yLabel);
 
           if (!match) {
-            return tg(
-              bot.token,
-              chat,
-              `⚠️ No DAILY_SYNC for yesterday\n📟 ${bot.device}\n📡 Status: ${computeLiveStatus(devRow)}`
-            );
-          }
-
-          tg(
-            bot.token,
-            chat,
-            buildSlaMessage({
+            tg(bot.token, chat, `⚠️ No DAILY_SYNC for yesterday\n📟 ${bot.device}\n📡 Status: ${computeLiveStatus(devRow)}`);
+          } else {
+            tg(bot.token, chat, buildSlaMessage({
               title: "Yesterday SLA (24h)",
               device: bot.device,
               status: computeLiveStatus(devRow),
               label: yLabel,
               uptimeMs: match.uptime_ms,
-            })
+            }));
+          }
+        }
+
+        if (cmd === "/fw") {
+          const row = await dbGet(
+            `SELECT current_version, latest_version FROM firmware_control WHERE device=?`,
+            [bot.device.toUpperCase()]
+          );
+
+          tg(bot.token, chat,
+            `📟 ${bot.device}\n` +
+            `Current Device Version: ${row?.current_version || "Unknown"}\n` +
+            `Latest Server Version: ${row?.latest_version || "Not set"}`
           );
         }
-       if (cmd === "/fw") {
-
-  const row = await dbGet(
-    `SELECT current_version, latest_version
-     FROM firmware_control
-     WHERE device=?`,
-    [bot.device.toUpperCase()]
-  );
-
-  tg(
-    bot.token,
-    chat,
-    `📟 ${bot.device}\n` +
-    `Current Device Version: ${row?.current_version || "Unknown"}\n` +
-    `Latest Server Version: ${row?.latest_version || "Not set"}`
-  );
-}
 
         if (cmd === "/statusweek") {
           const rows = await dbAll(
-            `SELECT day,uptime_ms FROM daily_uptime
-             WHERE device=? ORDER BY day DESC LIMIT 7`,
-            [bot.device]
+            `SELECT day,uptime_ms FROM daily_uptime WHERE device=? ORDER BY day DESC LIMIT 7`,
+            [bot.device.toUpperCase()]
           );
 
-          if (!rows.length)
-            return tg(bot.token, chat, "⚠️ No uptime data yet.");
+          if (!rows.length) {
+            tg(bot.token, chat, "⚠️ No uptime data yet.");
+            continue;
+          }
 
           const ordered = rows.reverse();
-          const totalUp = ordered.reduce(
-            (s, r) => s + (r.uptime_ms || 0),
-            0
-          );
-
+          const totalUp = ordered.reduce((s, r) => s + (r.uptime_ms || 0), 0);
           const expected = ordered.length * DAY_MS;
           const overall = Math.min(100, (totalUp / expected) * 100);
 
-          let text =
-            `📈 Weekly SLA Summary\n` +
-            `📟 ${bot.device}\n\n` +
-            `Overall SLA: ${overall.toFixed(2)}%\n` +
-            `Total Uptime: ${(totalUp / 3600000).toFixed(2)}h\n\n`;
-
+          let text = `📈 Weekly SLA Summary\n📟 ${bot.device}\n\nOverall SLA: ${overall.toFixed(2)}%\nTotal Uptime: ${(totalUp / 3600000).toFixed(2)}h\n\n`;
           for (const r of ordered) {
             const p = slaPercent(r.uptime_ms || 0);
             text += `${epochSecToLabel(r.day)} ${bar(p)} ${p.toFixed(1)}%\n`;
           }
-
           tg(bot.token, chat, text);
         }
 
         if (cmd === "/statusmonth") {
           const rows = await dbAll(
-            `SELECT day,uptime_ms FROM daily_uptime
-             WHERE device=? ORDER BY day DESC LIMIT 30`,
-            [bot.device]
+            `SELECT day,uptime_ms FROM daily_uptime WHERE device=? ORDER BY day DESC LIMIT 30`,
+            [bot.device.toUpperCase()]
           );
 
-          if (!rows.length)
-            return tg(bot.token, chat, "⚠️ No uptime data yet.");
+          if (!rows.length) {
+            tg(bot.token, chat, "⚠️ No uptime data yet.");
+            continue;
+          }
 
-          const totalUp = rows.reduce(
-            (s, r) => s + (r.uptime_ms || 0),
-            0
-          );
-
+          const totalUp = rows.reduce((s, r) => s + (r.uptime_ms || 0), 0);
           const expected = rows.length * DAY_MS;
           const sla = Math.min(100, (totalUp / expected) * 100);
 
-          tg(
-            bot.token,
-            chat,
-            `📉 Monthly SLA Summary\n` +
-              `📟 ${bot.device}\n\n` +
-              `Overall SLA: ${sla.toFixed(2)}%\n` +
-              `Total Uptime: ${(totalUp / 3600000).toFixed(2)}h\n` +
-              `Days counted: ${rows.length}`
+          tg(bot.token, chat,
+            `📉 Monthly SLA Summary\n📟 ${bot.device}\n\nOverall SLA: ${sla.toFixed(2)}%\nTotal Uptime: ${(totalUp / 3600000).toFixed(2)}h\nDays counted: ${rows.length}`
           );
         }
 
         if (cmd === "/month") {
           const m = monthStartEpochSec();
-
           const r = await dbGet(
             `SELECT uptime_ms FROM monthly_uptime WHERE device=? AND month=?`,
-            [bot.device, m]
+            [bot.device.toUpperCase(), m]
           );
 
           if (!r) {
             tg(bot.token, chat, "⚠️ No MONTHLY_SYNC yet.");
           } else {
-            tg(
-              bot.token,
-              chat,
-              `🗓️ Monthly Summary\n📟 ${bot.device}\nUptime: ${(r.uptime_ms / 3600000).toFixed(2)}h`
-            );
+            tg(bot.token, chat, `🗓️ Monthly Summary\n📟 ${bot.device}\nUptime: ${(r.uptime_ms / 3600000).toFixed(2)}h`);
           }
         }
-
       }
-
+      scheduleNext(300); // Trigger next poll after processing updates
     } catch (err) {
-      console.log("Polling error:", err.message);
-       return setTimeout(poll, 2000);
+      console.error("❌ Polling error:", err);
+      scheduleNext(2000);
     }
+  }
 
-   setImmediate(poll);   // restart immediately
+  function scheduleNext(ms) {
+    setTimeout(poll, ms);
   }
 
   poll();
 }
+  
+
 
 for (const bot of BOTS) {
   startLongPolling(bot);
@@ -598,6 +547,7 @@ setInterval(async () => {
 app.listen(PORT, "0.0.0.0", () => {
   console.log("🚀 Server running on port", PORT);
 });
+
 
 
 
