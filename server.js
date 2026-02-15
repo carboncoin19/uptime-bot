@@ -211,6 +211,15 @@ const devNorm = dev;
       if (bot.deviceNorm === devNorm)
         broadcast(bot.token, msg);
   }
+if (event === "FW_REPORT") {
+  await dbRun(
+    `INSERT INTO firmware_control(device, current_version)
+     VALUES(?,?)
+     ON CONFLICT(device)
+     DO UPDATE SET current_version=?`,
+    [dev, version || "unknown", version || "unknown"]
+  );
+}
 
   /* OTA SUCCESS */
 if (event === "OTA_SUCCESS") {
@@ -270,19 +279,16 @@ app.get("/api/fw/:device", async (req, res) => {
   }
 
   // Reset update flag immediately
-  await dbRun(
-    `UPDATE firmware_control
-     SET update_requested=0
-     WHERE device=?`,
-    [dev]
-  );
+
 
   res.json({
-    update: true,
-    version: row.latest_version,
-    url: row.firmware_url,
-    force: row.force_update === 1
-  });
+  update: true,
+  version: row.latest_version,
+  url: row.firmware_url,
+  force: row.force_update === 1,
+  trigger: true
+});
+
 });
 
 
@@ -592,5 +598,6 @@ setInterval(async () => {
 app.listen(PORT, "0.0.0.0", () => {
   console.log("🚀 Server running on port", PORT);
 });
+
 
 
