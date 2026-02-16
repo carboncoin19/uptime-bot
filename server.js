@@ -164,6 +164,18 @@ async function broadcast(token, text) {
 }
 
 /* ===================== EVENT API ===================== */
+// ===================== TEMP DB DEBUG (REMOVE AFTER USE) =====================
+app.get("/__debug/db", async (req, res) => {
+  try {
+    const devices = await dbAll("SELECT * FROM devices");
+    const firmware = await dbAll("SELECT * FROM firmware_control");
+    res.json({ devices, firmware });
+  } catch (e) {
+    res.status(500).json({ error: String(e) });
+  }
+});
+
+/* ===================== EVENT API ===================== */
 app.post("/api/event", async (req, res) => {
   console.log("EVENT:", req.body);
 
