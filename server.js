@@ -122,19 +122,12 @@ function computeLiveStatus(d) {
 function buildSlaMessage({ title, device, status, label, uptimeMs }) {
   const p = slaPercent(uptimeMs);
   return (
-    "📊 " + title + "
-" +
-    "📟 " + device + "
-" +
-    "📡 Status: " + status + "
-" +
-    "📅 " + label + "
-
-" +
-    "SLA: " + p.toFixed(2) + "%
-" +
-    "Uptime: " + (uptimeMs / 3600000).toFixed(2) + "h
-" +
+    "📊 " + title + "\\n" +
+    "📟 " + device + "\\n" +
+    "📡 Status: " + status + "\\n" +
+    "📅 " + label + "\\n\\n" +
+    "SLA: " + p.toFixed(2) + "%\\n" +
+    "Uptime: " + (uptimeMs / 3600000).toFixed(2) + "h\\n" +
     bar(p)
   );
 }
