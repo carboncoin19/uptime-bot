@@ -369,10 +369,57 @@ function startLongPolling(bot) {
           );
 
           tg(bot.token, chat,
-            `📟 ${bot.device}\n` +
-            `Current Device Version: ${row?.current_version || "Unknown"}\n` +
+            `📟 ${bot.device}
+` +
+            `Current Device Version: ${row?.current_version || "Unknown"}
+` +
             `Latest Server Version: ${row?.latest_version || "Not set"}`
           );
+        }
+
+        // ===================== /status (YESTERDAY SLA) =====================
+        if (cmd === "/status") {
+          try {
+            const today = todayEpochSec();
+            const yLabel = epochSecToLabel(today - 86400);
+
+            const rows = await dbAll(
+              `SELECT day,uptime_ms FROM daily_uptime WHERE device=? ORDER BY day DESC LIMIT 7`,
+              [bot.deviceNorm]
+            );
+
+            const match = rows.find(r => epochSecToLabel(r.day) === yLabel);
+
+            const devRow = await dbGet(
+              `SELECT last_seen,status FROM devices WHERE device=?`,
+              [bot.deviceNorm]
+            );
+
+            if (!match) {
+              await tg(
+                bot.token,
+                chat,
+                `⚠️ No DAILY_SYNC for yesterday
+📟 ${bot.device}
+📡 Status: ${computeLiveStatus(devRow)}`
+              );
+            } else {
+              await tg(
+                bot.token,
+                chat,
+                buildSlaMessage({
+                  title: "Yesterday SLA (24h)",
+                  device: bot.device,
+                  status: computeLiveStatus(devRow),
+                  label: yLabel,
+                  uptimeMs: match.uptime_ms,
+                })
+              );
+            }
+          } catch (e) {
+            console.error("/status error:", e);
+            await tg(bot.token, chat, "⚠️ Status temporarily unavailable");
+          }
         }
       }
       scheduleNext(300);
