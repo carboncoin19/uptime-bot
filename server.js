@@ -399,8 +399,60 @@ function startLongPolling(bot) {
               await tg(
                 bot.token,
                 chat,
-                `⚠️ No DAILY_SYNC for yesterday
-📟 ${bot.device}
+                `⚠️ No DAILY_SYNC for yesterday\n📟 ${bot.device}\n📡 Status: ${computeLiveStatus(devRow)}`
+              );
+            } else {
+              await tg(
+                bot.token,
+                chat,
+                buildSlaMessage({
+                  title: "Yesterday SLA (24h)",
+                  device: bot.device,
+                  status: computeLiveStatus(devRow),
+                  label: yLabel,
+                  uptimeMs: match.uptime_ms,
+                })
+              );
+            }
+          } catch (e) {
+            console.error("/status error:", e);
+            await tg(bot.token, chat, "⚠️ Status temporarily unavailable");
+          }
+        }
+
+        // ===================== /statusweek (WEEKLY SLA) =====================
+        if (cmd === "/statusweek") {
+          try {
+            const rows = await dbAll(
+              `SELECT day,uptime_ms FROM daily_uptime WHERE device=? ORDER BY day DESC LIMIT 7`,
+              [bot.deviceNorm]
+            );
+
+            if (!rows.length) {
+              await tg(bot.token, chat, "⚠️ No uptime data yet.");
+              return;
+            }
+
+            const ordered = rows.slice().reverse();
+            const totalUp = ordered.reduce((s, r) => s + (r.uptime_ms || 0), 0);
+            const expected = ordered.length * DAY_MS;
+            const overall = Math.min(100, (totalUp / expected) * 100);
+
+            let text = `📈 Weekly SLA Summary\n📟 ${bot.device}\n\n`;
+            text += `Overall SLA: ${overall.toFixed(2)}%\n`;
+            text += `Total Uptime: ${(totalUp / 3600000).toFixed(2)}h\n\n`;
+
+            for (const r of ordered) {
+              const p = slaPercent(r.uptime_ms || 0);
+              text += `${epochSecToLabel(r.day)} ${bar(p)} ${p.toFixed(1)}%\n`;
+            }
+
+            await tg(bot.token, chat, text);
+          } catch (e) {
+            console.error("/statusweek error:", e);
+            await tg(bot.token, chat, "⚠️ Weekly status unavailable");
+          }
+        }
 📡 Status: ${computeLiveStatus(devRow)}`
               );
             } else {
