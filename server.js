@@ -399,7 +399,9 @@ function startLongPolling(bot) {
               await tg(
                 bot.token,
                 chat,
-                `⚠️ No DAILY_SYNC for yesterday\n📟 ${bot.device}\n📡 Status: ${computeLiveStatus(devRow)}`
+                `⚠️ No DAILY_SYNC for yesterday
+📟 ${bot.device}
+📡 Status: ${computeLiveStatus(devRow)}`
               );
             } else {
               await tg(
@@ -438,13 +440,20 @@ function startLongPolling(bot) {
             const expected = ordered.length * DAY_MS;
             const overall = Math.min(100, (totalUp / expected) * 100);
 
-            let text = `📈 Weekly SLA Summary\n📟 ${bot.device}\n\n`;
-            text += `Overall SLA: ${overall.toFixed(2)}%\n`;
-            text += `Total Uptime: ${(totalUp / 3600000).toFixed(2)}h\n\n`;
+            let text = `📈 Weekly SLA Summary
+📟 ${bot.device}
+
+`;
+            text += `Overall SLA: ${overall.toFixed(2)}%
+`;
+            text += `Total Uptime: ${(totalUp / 3600000).toFixed(2)}h
+
+`;
 
             for (const r of ordered) {
               const p = slaPercent(r.uptime_ms || 0);
-              text += `${epochSecToLabel(r.day)} ${bar(p)} ${p.toFixed(1)}%\n`;
+              text += `${epochSecToLabel(r.day)} ${bar(p)} ${p.toFixed(1)}%
+`;
             }
 
             await tg(bot.token, chat, text);
