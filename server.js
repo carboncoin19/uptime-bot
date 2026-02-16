@@ -401,26 +401,6 @@ function startLongPolling(bot) {
                 chat,
                 `⚠️ No DAILY_SYNC for yesterday
 📟 ${bot.device}
-📡 Status: ${computeLiveStatus(devRow)}`
-              );
-            } else {
-              await tg(
-                bot.token,
-                chat,
-                buildSlaMessage({
-                  title: "Yesterday SLA (24h)",
-                  device: bot.device,
-                  status: computeLiveStatus(devRow),
-                  label: yLabel,
-                  uptimeMs: match.uptime_ms,
-                })
-              );
-            }
-          } catch (e) {
-            console.error("/status error:", e);
-            await tg(bot.token, chat, "⚠️ Status temporarily unavailable");
-          }
-        }
 
         // ===================== /statusweek (WEEKLY SLA) =====================
         if (cmd === "/statusweek") {
