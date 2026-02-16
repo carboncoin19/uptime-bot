@@ -2,6 +2,8 @@ import express from "express";
 import sqlite3 from "sqlite3";
 import fetch from "node-fetch";
 import fs from "fs";
+import path from "path";
+
 
 /* ================= CONFIG ================= */
 const PORT = process.env.PORT || 8080;
@@ -34,6 +36,10 @@ if (!fs.existsSync("/data")) fs.mkdirSync("/data", { recursive: true });
 
 /* ---------- APP ---------- */
 const app = express();
+const __dirname = new URL(".", import.meta.url).pathname;
+
+app.use("/firmware", express.static(path.join(__dirname, "firmware")));
+
 app.use(express.json());
 
 app.get("/", (req, res) => res.status(200).send("OK"));
@@ -329,7 +335,7 @@ function startLongPolling(bot) {
           }
 
           const newVersion = parts[1];
-          const fwUrl = "https://github.com/carboncoin19/esp32-uptime-ota/releases/latest/download/firmware.bin";
+          const fwUrl =   "http://uptime-bot-production-9a37.up.railway.app/firmware/NDONI-UPTIME.bin";
 
           await dbRun(
             `INSERT INTO firmware_control
@@ -354,7 +360,7 @@ function startLongPolling(bot) {
           }
 
           const newVersion = parts[1];
-          const fwUrl = "https://github.com/carboncoin19/esp32-uptime-ota/releases/latest/download/firmware.bin";
+          const fwUrl =   "http://uptime-bot-production-9a37.up.railway.app/firmware/NDONI-UPTIME.bin";
 
           await dbRun(
             `INSERT INTO firmware_control
@@ -547,6 +553,7 @@ setInterval(async () => {
 app.listen(PORT, "0.0.0.0", () => {
   console.log("🚀 Server running on port", PORT);
 });
+
 
 
 
