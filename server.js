@@ -56,6 +56,9 @@ db.get("PRAGMA journal_mode=WAL;");
 
 /* ===================== DB INIT ===================== */
 db.serialize(() => {
+  // ---- Ensure firmware_control has current_version column (schema migration)
+  db.run(`ALTER TABLE firmware_control ADD COLUMN current_version TEXT`, () => {});
+
   db.run(`CREATE TABLE IF NOT EXISTS chats(
     chat_id INTEGER,
     bot_token TEXT,
@@ -258,12 +261,13 @@ app.post("/api/event", async (req, res) => {
   }
 
   if (event === "FW_REPORT") {
-    // Persist firmware version (row guaranteed to exist)
+    // Persist firmware version (handle old DB schemas safely)
     await dbRun(
-      `UPDATE firmware_control
-       SET current_version=?
-       WHERE device=?`,
-      [version || "unknown", dev]
+      `INSERT INTO firmware_control(device, current_version)
+       VALUES(?,?)
+       ON CONFLICT(device)
+       DO UPDATE SET current_version=excluded.current_version`,
+      [dev, version || "unknown"]
     );
   }
 
