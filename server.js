@@ -188,14 +188,31 @@ app.post("/api/event", async (req, res) => {
   // HEARTBEAT: still update last_seen so /status works
   if (event === "HEARTBEAT") {
     if (dev) {
+    const status =
+      event === "ONLINE" || event === "OFFLINE" ? event : null;
+
+    await dbRun(
+      `INSERT INTO devices(device,last_seen,status)
+       VALUES(?,?,?)
+       ON CONFLICT(device)
+       DO UPDATE SET last_seen=excluded.last_seen`,
+      [dev, now, status]
+    );
+
+    if (status)
       await dbRun(
-        `INSERT INTO devices(device,last_seen)
-         VALUES(?,?)
-         ON CONFLICT(device)
-         DO UPDATE SET last_seen=excluded.last_seen`,
-        [dev, now]
+        `UPDATE devices SET status=? WHERE device=?`,
+        [status, dev]
       );
-    }
+
+    // 🔧 ENSURE firmware_control row exists for this device
+    await dbRun(
+      `INSERT INTO firmware_control(device)
+       VALUES(?)
+       ON CONFLICT(device) DO NOTHING`,
+      [dev]
+    );
+  }
     return res.json({ ok: true });
   }({ ok: true });
 
@@ -241,13 +258,12 @@ app.post("/api/event", async (req, res) => {
   }
 
   if (event === "FW_REPORT") {
-    // Persist firmware AND mark device as seen
+    // Persist firmware version (row guaranteed to exist)
     await dbRun(
-      `INSERT INTO firmware_control(device, current_version)
-       VALUES(?,?)
-       ON CONFLICT(device)
-       DO UPDATE SET current_version=?`,
-      [dev, version || "unknown", version || "unknown"]
+      `UPDATE firmware_control
+       SET current_version=?
+       WHERE device=?`,
+      [version || "unknown", dev]
     );
   }
 
