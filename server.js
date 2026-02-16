@@ -163,6 +163,8 @@ async function broadcast(token, text) {
 
 /* ---------- EVENT API ---------- */
 app.post("/api/event", async (req, res) => {
+  console.log("EVENT:", req.body);
+
   const { device, event, uptime_ms, day, month, time, version } = req.body;
   const now = Date.now();
 const dev = String(device || "").trim().toUpperCase();
@@ -553,6 +555,7 @@ setInterval(async () => {
 app.listen(PORT, "0.0.0.0", () => {
   console.log("🚀 Server running on port", PORT);
 });
+
 
 
 
