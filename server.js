@@ -375,14 +375,13 @@ function startLongPolling(bot) {
           );
 
           tg(
-            bot.token,
-            chat,
-            "📟 " + bot.device + "
-" +
-              "Current Device Version: " + (row?.current_version || "Unknown") + "
-" +
-              "Latest Server Version: " + (row?.latest_version || "Not set")
-          );
+  bot.token,
+  chat,
+  "📟 " + bot.device + "\n" +
+  "Current Device Version: " + (row?.current_version || "Unknown") + "\n" +
+  "Latest Server Version: " + (row?.latest_version || "Not set")
+);
+
         }
 
         // ===================== /status (YESTERDAY SLA) =====================
@@ -494,4 +493,5 @@ setInterval(async () => {
 app.listen(PORT, "0.0.0.0", () => {
   console.log("🚀 Server running on port", PORT);
 });
+
 
