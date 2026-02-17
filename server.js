@@ -311,7 +311,7 @@ app.post("/api/event", async (req, res) => {
   }
 
   res.json({ ok: true });
-});
+}
 
 /* ===================== OTA CHECK API ===================== */
 app.get("/api/fw/:device", async (req, res) => {
@@ -494,3 +494,4 @@ setInterval(async () => {
 app.listen(PORT, "0.0.0.0", () => {
   console.log("🚀 Server running on port", PORT);
 });
+
