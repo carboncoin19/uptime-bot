@@ -370,6 +370,12 @@ function startLongPolling(bot) {
                 if (cmd.startsWith("/update")) {
           const parts = cmd.split(" ");
 
+          if (cmd.startsWith("/update")) {
+  console.log("TG /update received:", bot.deviceNorm, cmd);
+
+  const parts = cmd.split(" ");
+
+
           if (parts.length < 2) {
             await tg(
               bot.token,
@@ -622,6 +628,7 @@ setInterval(async () => {
 app.listen(PORT, "0.0.0.0", () => {
   console.log("🚀 Server running on port", PORT);
 });
+
 
 
 
