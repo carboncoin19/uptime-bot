@@ -428,7 +428,52 @@ function startLongPolling(bot) {
             console.error("/status error:", e);
             await tg(bot.token, chat, "⚠️ Status temporarily unavailable");
           }
-        }
+        }  
+        if (cmd === "/statusweek") {
+  try {
+    const rows = await dbAll(
+      `SELECT day, uptime_ms
+       FROM daily_uptime
+       WHERE device=?
+       ORDER BY day DESC
+       LIMIT 7`,
+      [bot.deviceNorm]
+    );
+
+    if (!rows.length) {
+      await tg(bot.token, chat, "⚠️ No uptime data for this week.");
+      continue;
+    }
+
+    const ordered = rows.reverse();
+
+    let totalUp = 0;
+    for (const r of ordered) totalUp += (r.uptime_ms || 0);
+
+    const expected = ordered.length * DAY_MS;
+    const overall = Math.min(100, (totalUp / expected) * 100);
+
+    let text =
+      "📈 Weekly SLA Summary\n" +
+      "📟 " + bot.device + "\n\n" +
+      "Overall SLA: " + overall.toFixed(2) + "%\n" +
+      "Total Uptime: " + (totalUp / 3600000).toFixed(2) + "h\n\n";
+
+    for (const r of ordered) {
+      const p = slaPercent(r.uptime_ms || 0);
+      text +=
+        epochSecToLabel(r.day) + " " +
+        bar(p) + " " +
+        p.toFixed(1) + "%\n";
+    }
+
+    await tg(bot.token, chat, text);
+  } catch (e) {
+    console.error("/statusweek error:", e);
+    await tg(bot.token, chat, "⚠️ Weekly status temporarily unavailable");
+  }
+}
+
       }
       scheduleNext(300);
     } catch (err) {
@@ -492,6 +537,7 @@ setInterval(async () => {
 app.listen(PORT, "0.0.0.0", () => {
   console.log("🚀 Server running on port", PORT);
 });
+
 
 
 
