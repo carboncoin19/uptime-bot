@@ -403,14 +403,15 @@ function startLongPolling(bot) {
             );
 
             if (!match) {
-             await tg(
-  bot.token,
-  chat,
-  "⚠️ No DAILY_SYNC for yesterday\n" +
-  "📟 " + bot.device + "\n" +
-  "📡 Status: " + computeLiveStatus(devRow)
-);
-
+              await tg(
+                bot.token,
+                chat,
+                "⚠️ No DAILY_SYNC for yesterday
+" +
+                  "📟 " + bot.device + "
+" +
+                  "📡 Status: " + computeLiveStatus(devRow)
+              );
             } else {
               await tg(
                 bot.token,
@@ -424,6 +425,16 @@ function startLongPolling(bot) {
                 })
               );
             }
+          } catch (e) {
+            console.error("/status error:", e);
+            await tg(bot.token, chat, "⚠️ Status temporarily unavailable");
+          }
+        }
+
+        // ===================== /statusweek (PLACEHOLDER) =====================
+        if (cmd === "/statusweek") {
+          await tg(bot.token, chat, "📈 Weekly SLA coming soon...");
+        }
           } catch (e) {
             console.error("/status error:", e);
             await tg(bot.token, chat, "⚠️ Status temporarily unavailable");
