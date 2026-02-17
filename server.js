@@ -224,7 +224,7 @@ app.post("/api/event", async (req, res) => {
   }
     return res.json({ ok: true });
   
-
+  }
   if (dev) {
     const status =
       event === "ONLINE" || event === "OFFLINE" ? event : null;
@@ -403,15 +403,14 @@ function startLongPolling(bot) {
             );
 
             if (!match) {
-              await tg(
-                bot.token,
-                chat,
-                "⚠️ No DAILY_SYNC for yesterday
-" +
-                "📟 " + bot.device + "
-" +
-                "📡 Status: " + computeLiveStatus(devRow)
-              );
+             await tg(
+  bot.token,
+  chat,
+  "⚠️ No DAILY_SYNC for yesterday\n" +
+  "📟 " + bot.device + "\n" +
+  "📡 Status: " + computeLiveStatus(devRow)
+);
+
             } else {
               await tg(
                 bot.token,
@@ -493,5 +492,6 @@ setInterval(async () => {
 app.listen(PORT, "0.0.0.0", () => {
   console.log("🚀 Server running on port", PORT);
 });
+
 
 
