@@ -367,6 +367,52 @@ function startLongPolling(bot) {
 
         if (cmd === "/start")
           tg(bot.token, chat, `📡 ${bot.device} uptime monitor active.`);
+                if (cmd.startsWith("/update")) {
+          const parts = cmd.split(" ");
+
+          if (parts.length < 2) {
+            await tg(
+              bot.token,
+              chat,
+              "Usage: /update <version>\nExample: /update 1.0.5"
+            );
+            continue;
+
+          }
+
+          const newVersion = parts[1];
+          const fwUrl =
+            "https://github.com/carboncoin19/esp32-uptime-ota/releases/latest/download/firmware.bin";
+
+          await dbRun(
+            `INSERT INTO firmware_control
+             (device, latest_version, firmware_url, update_requested, force_update)
+             VALUES(?,?,?,?,0)
+             ON CONFLICT(device)
+             DO UPDATE SET
+               latest_version=?,
+               firmware_url=?,
+               update_requested=1,
+               force_update=0`,
+            [
+              bot.deviceNorm,
+              newVersion,
+              fwUrl,
+              1,
+              newVersion,
+              fwUrl
+            ]
+          );
+
+          await tg(
+            bot.token,
+            chat,
+            "🚀 Update requested\n" +
+            "📟 " + bot.device + "\n" +
+            "🆕 " + newVersion
+          );
+        }
+
 
         if (cmd === "/fw") {
           const row = await dbGet(
@@ -382,7 +428,8 @@ function startLongPolling(bot) {
   "Latest Server Version: " + (row?.latest_version || "Not set")
 );
 
-        }
+        } 
+        
 
         // ===================== /status (YESTERDAY SLA) =====================
         if (cmd === "/status") {
@@ -442,7 +489,8 @@ function startLongPolling(bot) {
 
     if (!rows.length) {
       await tg(bot.token, chat, "⚠️ No uptime data for this week.");
-      continue;
+      return;
+
     }
 
     const ordered = rows.reverse();
@@ -473,6 +521,43 @@ function startLongPolling(bot) {
     await tg(bot.token, chat, "⚠️ Weekly status temporarily unavailable");
   }
 }
+        // ===================== /statusmonth (30-DAY SLA) =====================
+        if (cmd === "/statusmonth") {
+          try {
+            const rows = await dbAll(
+              `SELECT day, uptime_ms
+               FROM daily_uptime
+               WHERE device=?
+               ORDER BY day DESC
+               LIMIT 30`,
+              [bot.deviceNorm]
+            );
+
+            if (!rows.length) {
+              await tg(bot.token, chat, "⚠️ No uptime data for this month.");
+              return;
+            }
+
+            let totalUp = 0;
+            for (const r of rows) totalUp += (r.uptime_ms || 0);
+
+            const expected = rows.length * DAY_MS;
+            const sla = Math.min(100, (totalUp / expected) * 100);
+
+            await tg(
+              bot.token,
+              chat,
+              "📉 Monthly SLA Summary\n" +
+              "📟 " + bot.device + "\n\n" +
+              "Overall SLA: " + sla.toFixed(2) + "%\n" +
+              "Total Uptime: " + (totalUp / 3600000).toFixed(2) + "h\n" +
+              "Days counted: " + rows.length
+            );
+          } catch (e) {
+            console.error("/statusmonth error:", e);
+            await tg(bot.token, chat, "⚠️ Monthly status temporarily unavailable");
+          }
+        }
 
       }
       scheduleNext(300);
@@ -537,6 +622,7 @@ setInterval(async () => {
 app.listen(PORT, "0.0.0.0", () => {
   console.log("🚀 Server running on port", PORT);
 });
+
 
 
 
