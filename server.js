@@ -367,9 +367,7 @@ function startLongPolling(bot) {
 
         if (cmd === "/start")
           tg(bot.token, chat, `📡 ${bot.device} uptime monitor active.`);
-                if (cmd.startsWith("/update")) {
-          const parts = cmd.split(" ");
-
+              
           if (cmd.startsWith("/update")) {
   console.log("TG /update received:", bot.deviceNorm, cmd);
 
@@ -628,6 +626,7 @@ setInterval(async () => {
 app.listen(PORT, "0.0.0.0", () => {
   console.log("🚀 Server running on port", PORT);
 });
+
 
 
 
