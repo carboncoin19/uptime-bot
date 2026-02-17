@@ -56,8 +56,14 @@ db.get("PRAGMA journal_mode=WAL;");
 
 /* ===================== DB INIT ===================== */
 db.serialize(() => {
-  // ---- Ensure firmware_control has current_version column (schema migration)
-  db.run(`ALTER TABLE firmware_control ADD COLUMN current_version TEXT`, () => {});
+    // ---- Ensure firmware_control has current_version column (safe migration)
+  db.all(`PRAGMA table_info(firmware_control)`, (err, cols) => {
+    if (err) return;
+    const hasCol = cols.some(c => c.name === "current_version");
+    if (!hasCol) {
+      db.run(`ALTER TABLE firmware_control ADD COLUMN current_version TEXT`);
+    }
+  });
 
   db.run(`CREATE TABLE IF NOT EXISTS chats(
     chat_id INTEGER,
@@ -148,12 +154,6 @@ function buildSlaMessage({ title, device, status, label, uptimeMs }) {
 }
 
 /* ===================== TELEGRAM HELPERS ===================== */
-function msg(...lines) {
-  return lines.join("
-");
-}
-
-
 async function tg(token, chat, text) {
   try {
     await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
@@ -407,11 +407,11 @@ function startLongPolling(bot) {
               await tg(
                 bot.token,
                 chat,
-                msg(
-                  "⚠️ No DAILY_SYNC for yesterday",
-                  "📟 " + bot.device,
-                  "📡 Status: " + computeLiveStatus(devRow)
-                )
+                "⚠️ No DAILY_SYNC for yesterday
+" +
+                "📟 " + bot.device + "
+" +
+                "📡 Status: " + computeLiveStatus(devRow)
               );
             } else {
               await tg(
@@ -427,10 +427,6 @@ function startLongPolling(bot) {
               );
             }
           } catch (e) {
-            console.error("/status error:", e);
-            await tg(bot.token, chat, "⚠️ Status temporarily unavailable");
-          }
-        } catch (e) {
             console.error("/status error:", e);
             await tg(bot.token, chat, "⚠️ Status temporarily unavailable");
           }
