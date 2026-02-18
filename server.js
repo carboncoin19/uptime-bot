@@ -368,61 +368,54 @@ function startLongPolling(bot) {
         if (cmd === "/start")
           tg(bot.token, chat, `📡 ${bot.device} uptime monitor active.`);
       
-          if (cmd.startsWith("/update")) {
+        if (cmd.startsWith("/update")) {
   console.log("TG /update received:", bot.deviceNorm, cmd);
-            
-await dbRun(
-  `UPDATE firmware_control SET update_requested=1 WHERE device=?`,
-  ["NDONI-UPTIME"]
-);
 
   const parts = cmd.split(" ");
+  const newVersion = parts.slice(1).join(" ").trim();
 
+  if (!newVersion) {
+    await tg(
+      bot.token,
+      chat,
+      "❌ Invalid version.\nUsage: /update 1.0.5"
+    );
+    continue;
+  }
 
-          if (parts.length < 2) {
-            await tg(
-              bot.token,
-              chat,
-              "Usage: /update <version>\nExample: /update 1.0.5"
-            );
-            continue;
+  const fwUrl =
+    "https://github.com/carboncoin19/esp32-uptime-ota/releases/latest/download/firmware.bin";
 
-          }
+  await dbRun(
+    `INSERT INTO firmware_control
+     (device, latest_version, firmware_url, update_requested, force_update)
+     VALUES(?,?,?,?,?)
+     ON CONFLICT(device)
+     DO UPDATE SET
+       latest_version=excluded.latest_version,
+       firmware_url=excluded.firmware_url,
+       update_requested=1,
+       force_update=0`,
+    [
+      bot.deviceNorm,
+      newVersion,
+      fwUrl,
+      1,
+      0
+    ]
+  );
 
-          const newVersion = parts[1];
-          const fwUrl =
-            "https://github.com/carboncoin19/esp32-uptime-ota/releases/latest/download/firmware.bin";
+  await tg(
+    bot.token,
+    chat,
+    "🚀 Update requested\n" +
+    "📟 " + bot.device + "\n" +
+    "🆕 " + newVersion
+  );
 
-         await dbRun(
-  `INSERT INTO firmware_control
-   (device, latest_version, firmware_url, update_requested, force_update)
-   VALUES(?,?,?,?,?)
-   ON CONFLICT(device)
-   DO UPDATE SET
-     latest_version=excluded.latest_version,
-     firmware_url=excluded.firmware_url,
-     update_requested=1,
-     force_update=0`,
-  [
-    bot.deviceNorm,
-    newVersion,
-    fwUrl,
-    1,
-    0
-  ]
-);
+  continue;
+}
 
-
-          await tg(
-            bot.token,
-            chat,
-            "🚀 Update requested\n" +
-            "📟 " + bot.device + "\n" +
-            "🆕 " + newVersion
-          );
-            continue;
-        }
-        
 
 
 
@@ -636,6 +629,7 @@ setInterval(async () => {
 app.listen(PORT, "0.0.0.0", () => {
   console.log("🚀 Server running on port", PORT);
 });
+
 
 
 
