@@ -367,7 +367,7 @@ function startLongPolling(bot) {
 
         if (cmd === "/start")
           tg(bot.token, chat, `📡 ${bot.device} uptime monitor active.`);
-              
+      
           if (cmd.startsWith("/update")) {
   console.log("TG /update received:", bot.deviceNorm, cmd);
 
@@ -415,7 +415,10 @@ function startLongPolling(bot) {
             "📟 " + bot.device + "\n" +
             "🆕 " + newVersion
           );
+            continue;
         }
+        
+
 
 
         if (cmd === "/fw") {
@@ -493,7 +496,8 @@ function startLongPolling(bot) {
 
     if (!rows.length) {
       await tg(bot.token, chat, "⚠️ No uptime data for this week.");
-      return;
+     continue;
+
 
     }
 
@@ -539,7 +543,8 @@ function startLongPolling(bot) {
 
             if (!rows.length) {
               await tg(bot.token, chat, "⚠️ No uptime data for this month.");
-              return;
+              continue;
+
             }
 
             let totalUp = 0;
@@ -626,6 +631,7 @@ setInterval(async () => {
 app.listen(PORT, "0.0.0.0", () => {
   console.log("🚀 Server running on port", PORT);
 });
+
 
 
 
