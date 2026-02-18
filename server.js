@@ -188,18 +188,22 @@ app.get("/__debug/db", async (req, res) => {
 app.get("/__debug/fix-ota", async (req, res) => {
   try {
     await dbRun(
-      `UPDATE firmware_control
-       SET latest_version = ?,
-           firmware_url = ?
-       WHERE device = ?`,
+      `INSERT INTO firmware_control
+       (device, latest_version, firmware_url, update_requested, force_update)
+       VALUES (?, ?, ?, 1, 0)
+       ON CONFLICT(device)
+       DO UPDATE SET
+         latest_version = excluded.latest_version,
+         firmware_url = excluded.firmware_url,
+         update_requested = 1`,
       [
+        "NDONI-UPTIME",
         "1.0.5",
-        "https://github.com/carboncoin19/esp32-uptime-ota/releases/latest/download/firmware.bin",
-        "NDONI-UPTIME"
+        "https://github.com/carboncoin19/esp32-uptime-ota/releases/latest/download/firmware.bin"
       ]
     );
 
-    res.json({ ok: true, message: "OTA fields fixed" });
+    res.json({ ok: true, message: "OTA fields fixed (UPSERT)" });
   } catch (e) {
     res.status(500).json({ error: String(e) });
   }
@@ -651,6 +655,7 @@ setInterval(async () => {
 app.listen(PORT, "0.0.0.0", () => {
   console.log("🚀 Server running on port", PORT);
 });
+
 
 
 
