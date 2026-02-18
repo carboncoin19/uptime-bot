@@ -184,6 +184,28 @@ app.get("/__debug/db", async (req, res) => {
   }
 });
 
+// ===================== TEMP OTA FIX (REMOVE AFTER USE) =====================
+app.get("/__debug/fix-ota", async (req, res) => {
+  try {
+    await dbRun(
+      `UPDATE firmware_control
+       SET latest_version = ?,
+           firmware_url = ?
+       WHERE device = ?`,
+      [
+        "1.0.5",
+        "https://github.com/carboncoin19/esp32-uptime-ota/releases/latest/download/firmware.bin",
+        "NDONI-UPTIME"
+      ]
+    );
+
+    res.json({ ok: true, message: "OTA fields fixed" });
+  } catch (e) {
+    res.status(500).json({ error: String(e) });
+  }
+});
+
+
 /* ===================== EVENT API ===================== */
 app.post("/api/event", async (req, res) => {
   console.log("EVENT:", req.body);
@@ -629,6 +651,7 @@ setInterval(async () => {
 app.listen(PORT, "0.0.0.0", () => {
   console.log("🚀 Server running on port", PORT);
 });
+
 
 
 
