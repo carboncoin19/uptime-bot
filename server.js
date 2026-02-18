@@ -370,6 +370,11 @@ function startLongPolling(bot) {
       
           if (cmd.startsWith("/update")) {
   console.log("TG /update received:", bot.deviceNorm, cmd);
+            
+await dbRun(
+  `UPDATE firmware_control SET update_requested=1 WHERE device=?`,
+  ["NDONI-UPTIME"]
+);
 
   const parts = cmd.split(" ");
 
@@ -631,6 +636,7 @@ setInterval(async () => {
 app.listen(PORT, "0.0.0.0", () => {
   console.log("🚀 Server running on port", PORT);
 });
+
 
 
 
