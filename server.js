@@ -184,6 +184,26 @@ app.get("/__debug/db", async (req, res) => {
   }
 });
 
+
+// ===================== FIRMWARE ROW DIAG =====================
+app.get("/__debug/firmware-raw", async (req, res) => {
+  try {
+    const rows = await dbAll(
+      `SELECT
+         device,
+         length(device) AS len,
+         hex(device) AS hex,
+         latest_version,
+         firmware_url
+       FROM firmware_control`
+    );
+    res.json(rows);
+  } catch (e) {
+    res.status(500).json({ error: String(e) });
+  }
+});
+
+
 // ===================== TEMP OTA FIX (REMOVE AFTER USE) =====================
 app.get("/__debug/fix-ota", async (req, res) => {
   try {
@@ -655,6 +675,7 @@ setInterval(async () => {
 app.listen(PORT, "0.0.0.0", () => {
   console.log("🚀 Server running on port", PORT);
 });
+
 
 
 
