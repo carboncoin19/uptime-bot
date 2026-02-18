@@ -206,6 +206,7 @@ app.get("/__debug/firmware-raw", async (req, res) => {
 
 // ===================== TEMP OTA FIX (REMOVE AFTER USE) =====================
 app.get("/__debug/fix-ota", async (req, res) => {
+  console.log("🔥🔥🔥 FIX OTA ENDPOINT HIT 🔥🔥🔥");
   try {
     await dbRun(
       `INSERT INTO firmware_control
@@ -676,6 +677,7 @@ setInterval(async () => {
 app.listen(PORT, "0.0.0.0", () => {
   console.log("🚀 Server running on port", PORT);
 });
+
 
 
 
