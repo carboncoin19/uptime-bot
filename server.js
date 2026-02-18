@@ -53,56 +53,122 @@ const db = new sqlite3.Database(DB_FILE, err => {
 });
 
 db.get("PRAGMA journal_mode=WAL;");
+let firmwareSchemaReady = false;
+
 
 /* ===================== DB INIT ===================== */
 db.serialize(() => {
-    // ---- Ensure firmware_control has current_version column (safe migration)
+
+  db.run(`
+    CREATE TABLE IF NOT EXISTS firmware_control (
+      device TEXT PRIMARY KEY,
+      update_requested INTEGER DEFAULT 0
+    )
+  `);
+
   db.all(`PRAGMA table_info(firmware_control)`, (err, cols) => {
     if (err) return;
-    const hasCol = cols.some(c => c.name === "current_version");
-    if (!hasCol) {
-      db.run(`ALTER TABLE firmware_control ADD COLUMN current_version TEXT`);
-    }
+    console.log(
+  "✅ firmware_control columns:",
+  cols.map(c => c.name)
+);
+const has = name => cols.some(c => c.name === name);
+
+let pending = 0;
+
+if (!has("latest_version")) {
+  pending++;
+  db.run(
+    `ALTER TABLE firmware_control ADD COLUMN latest_version TEXT`,
+    () => { if (--pending === 0) firmwareSchemaReady = true; }
+  );
+}
+
+if (!has("firmware_url")) {
+  pending++;
+  db.run(
+    `ALTER TABLE firmware_control ADD COLUMN firmware_url TEXT`,
+    () => { if (--pending === 0) firmwareSchemaReady = true; }
+  );
+}
+
+if (!has("current_version")) {
+  pending++;
+  db.run(
+    `ALTER TABLE firmware_control ADD COLUMN current_version TEXT`,
+    () => { if (--pending === 0) firmwareSchemaReady = true; }
+  );
+}
+
+if (!has("force_update")) {
+  pending++;
+  db.run(
+    `ALTER TABLE firmware_control ADD COLUMN force_update INTEGER DEFAULT 0`,
+    () => { if (--pending === 0) firmwareSchemaReady = true; }
+  );
+}
+
+// If nothing to migrate, mark ready immediately
+if (pending === 0) {
+  firmwareSchemaReady = true;
+}
+
+
+
   });
 
-  db.run(`CREATE TABLE IF NOT EXISTS chats(
-    chat_id INTEGER,
-    bot_token TEXT,
-    PRIMARY KEY(chat_id, bot_token)
-  )`);
 
-  db.run(`CREATE TABLE IF NOT EXISTS devices(
+  // 3️⃣ Other tables AFTER
+     db.run(`
+  CREATE TABLE IF NOT EXISTS chats (
+    chat_id TEXT,
+    bot_token TEXT,
+    PRIMARY KEY (chat_id, bot_token)
+  )
+`);
+
+db.run(`
+  CREATE TABLE IF NOT EXISTS devices (
     device TEXT PRIMARY KEY,
     last_seen INTEGER,
     status TEXT
-  )`);
+  )
+`);
 
-  db.run(`CREATE TABLE IF NOT EXISTS daily_uptime(
+db.run(`
+  CREATE TABLE IF NOT EXISTS daily_uptime (
     device TEXT,
     day INTEGER,
     uptime_ms INTEGER,
-    PRIMARY KEY(device,day)
-  )`);
+    PRIMARY KEY (device, day)
+  )
+`);
 
-  db.run(`CREATE TABLE IF NOT EXISTS monthly_uptime(
+db.run(`
+  CREATE TABLE IF NOT EXISTS monthly_uptime (
     device TEXT,
     month INTEGER,
     uptime_ms INTEGER,
-    PRIMARY KEY(device,month)
-  )`);
+    PRIMARY KEY (device, month)
+  )
+`);
 
-  db.run(`CREATE TABLE IF NOT EXISTS firmware_control(
-    device TEXT PRIMARY KEY,
-    latest_version TEXT,
-    firmware_url TEXT,
-    update_requested INTEGER DEFAULT 0,
-    force_update INTEGER DEFAULT 0,
-    current_version TEXT
-  )`);
 });
 
+
 /* ===================== DB HELPERS ===================== */
-const dbRun = (s, p = []) => new Promise(r => db.run(s, p, () => r(true)));
+const dbRun = (s, p = []) =>
+  new Promise((resolve, reject) =>
+    db.run(s, p, function (err) {
+      if (err) {
+        console.error("❌ SQL ERROR:", err.message, s);
+        reject(err);
+      } else {
+        resolve(true);
+      }
+    })
+  );
+
 const dbGet = (s, p = []) => new Promise(r => db.get(s, p, (_, row) => r(row || null)));
 const dbAll = (s, p = []) => new Promise(r => db.all(s, p, (_, rows) => r(rows || [])));
 
@@ -206,6 +272,8 @@ app.get("/__debug/firmware-raw", async (req, res) => {
 
 // ===================== TEMP OTA FIX (REMOVE AFTER USE) =====================
 app.get("/__debug/fix-ota", async (req, res) => {
+  if (!firmwareSchemaReady)
+    return res.status(503).json({ error: "Firmware schema not ready" });
   console.log("🔥🔥🔥 FIX OTA ENDPOINT HIT 🔥🔥🔥");
   try {
     await dbRun(
@@ -244,22 +312,16 @@ app.post("/api/event", async (req, res) => {
   // HEARTBEAT: still update last_seen so /status works
   if (event === "HEARTBEAT") {
     if (dev) {
-    const status =
-      event === "ONLINE" || event === "OFFLINE" ? event : null;
-
+      
     await dbRun(
-      `INSERT INTO devices(device,last_seen,status)
-       VALUES(?,?,?)
-       ON CONFLICT(device)
-       DO UPDATE SET last_seen=excluded.last_seen`,
-      [dev, now, status]
-    );
+  `INSERT INTO devices(device,last_seen)
+   VALUES(?,?)
+   ON CONFLICT(device)
+   DO UPDATE SET last_seen=excluded.last_seen`,
+  [dev, now]
+);
 
-    if (status)
-      await dbRun(
-        `UPDATE devices SET status=? WHERE device=?`,
-        [status, dev]
-      );
+    // heartbeat only updates last_seen
 
     // 🔧 ENSURE firmware_control row exists for this device
     await dbRun(
@@ -362,6 +424,8 @@ app.post("/api/event", async (req, res) => {
 
 /* ===================== OTA CHECK API ===================== */
 app.get("/api/fw/:device", async (req, res) => {
+  if (!firmwareSchemaReady)
+    return res.json({ update: false });
   const dev = req.params.device.trim().toUpperCase();
 
   const row = await dbGet(
@@ -677,6 +741,7 @@ setInterval(async () => {
 app.listen(PORT, "0.0.0.0", () => {
   console.log("🚀 Server running on port", PORT);
 });
+
 
 
 
