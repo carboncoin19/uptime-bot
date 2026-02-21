@@ -239,6 +239,34 @@ async function broadcast(token, text) {
 }
 
 /* ===================== EVENT API ===================== */
+
+
+// ===================== TEMP DEBUG: LIST ALL DEVICES =====================
+// REMOVE AFTER VERIFICATION
+app.get("/__debug/devices", async (req, res) => {
+  try {
+    const devices = await dbAll(
+      `SELECT DISTINCT device FROM devices ORDER BY device`
+    );
+
+    const daily = await dbAll(
+      `SELECT DISTINCT device FROM daily_uptime ORDER BY device`
+    );
+
+    const monthly = await dbAll(
+      `SELECT DISTINCT device FROM monthly_uptime ORDER BY device`
+    );
+
+    res.json({
+      devices_table: devices.map(d => d.device),
+      daily_uptime_table: daily.map(d => d.device),
+      monthly_uptime_table: monthly.map(d => d.device),
+    });
+  } catch (e) {
+    res.status(500).json({ error: String(e) });
+  }
+});
+
 // ===================== TEMP DB DEBUG (REMOVE AFTER USE) =====================
 app.get("/__debug/db", async (req, res) => {
   try {
@@ -741,6 +769,7 @@ setInterval(async () => {
 app.listen(PORT, "0.0.0.0", () => {
   console.log("🚀 Server running on port", PORT);
 });
+
 
 
 
