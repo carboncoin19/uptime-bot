@@ -240,30 +240,43 @@ async function broadcast(token, text) {
 
 /* ===================== EVENT API ===================== */
 
-// ===================== TEMP FIX: MERGE KAINJI VARIANTS =====================
+// ===================== TEMP FIX: MERGE KAINJI VARIANTS (SAFE) =====================
 // RUN ONCE, THEN REMOVE
 app.get("/__debug/merge-kainji", async (req, res) => {
   try {
     const canonical = "KAINJI-UPTIME";
+    const variants = ["KAINJI-Uptime"];
 
-    await dbRun(
-      `UPDATE devices SET device=? WHERE device IN (?, ?)`,
-      [canonical, "KAINJI-Uptime", "kainji-uptime"]
-    );
+    // 1️⃣ Merge DAILY uptime
+    for (const v of variants) {
+      await dbRun(
+        `UPDATE OR IGNORE daily_uptime
+         SET device=?
+         WHERE device=?`,
+        [canonical, v]
+      );
+    }
 
-    await dbRun(
-      `UPDATE daily_uptime SET device=? WHERE device IN (?, ?)`,
-      [canonical, "KAINJI-Uptime", "kainji-uptime"]
-    );
+    // 2️⃣ Merge MONTHLY uptime
+    for (const v of variants) {
+      await dbRun(
+        `UPDATE OR IGNORE monthly_uptime
+         SET device=?
+         WHERE device=?`,
+        [canonical, v]
+      );
+    }
 
+    // 3️⃣ Delete duplicate device rows (KEEP canonical)
     await dbRun(
-      `UPDATE monthly_uptime SET device=? WHERE device IN (?, ?)`,
-      [canonical, "KAINJI-Uptime", "kainji-uptime"]
+      `DELETE FROM devices
+       WHERE device IN (?)`,
+      variants
     );
 
     res.json({
       ok: true,
-      message: "KAINJI device variants merged into KAINJI-UPTIME"
+      message: "KAINJI variants merged and duplicates removed safely"
     });
   } catch (e) {
     res.status(500).json({ error: String(e) });
@@ -798,6 +811,7 @@ setInterval(async () => {
 app.listen(PORT, "0.0.0.0", () => {
   console.log("🚀 Server running on port", PORT);
 });
+
 
 
 
