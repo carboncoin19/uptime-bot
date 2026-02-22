@@ -517,7 +517,8 @@ function startLongPolling(bot) {
     await tg(
       bot.token,
       chat,
-      "❌ Invalid version.\nUsage: /update 1.0.5"
+      "❌ Invalid version.
+Usage: /update 1.0.5"
     );
     continue;
   }
@@ -526,31 +527,55 @@ function startLongPolling(bot) {
     "https://github.com/carboncoin19/esp32-uptime-ota/releases/latest/download/firmware.bin";
 
   await dbRun(
-  `INSERT INTO firmware_control
-   (device, latest_version, firmware_url, update_requested, force_update)
-   VALUES(?,?,?,?,?)
-   ON CONFLICT(device)
-   DO UPDATE SET
-     latest_version=excluded.latest_version,
-     firmware_url=excluded.firmware_url,
-     update_requested=1,
-     force_update=0`,
-  [
-    bot.deviceNorm,
-    newVersion,
-    fwUrl,
-    1,
-    0
-  ]
-);
-
+    `INSERT INTO firmware_control
+     (device, latest_version, firmware_url, update_requested, force_update)
+     VALUES(?,?,?,?,?)
+     ON CONFLICT(device)
+     DO UPDATE SET
+       latest_version=excluded.latest_version,
+       firmware_url=excluded.firmware_url,
+       update_requested=1,
+       force_update=0`,
+    [
+      bot.deviceNorm,
+      newVersion,
+      fwUrl,
+      1,
+      0
+    ]
+  );
 
   await tg(
     bot.token,
     chat,
-    "🚀 Update requested\n" +
-    "📟 " + bot.device + "\n" +
+    "🚀 Update requested
+" +
+    "📟 " + bot.device + "
+" +
     "🆕 " + newVersion
+  );
+
+  continue;
+}
+
+// ===================== /ota cancel =====================
+if (cmd === "/ota cancel") {
+  console.log("TG /ota cancel received:", bot.deviceNorm);
+
+  await dbRun(
+    `UPDATE firmware_control
+     SET update_requested=0,
+         force_update=0
+     WHERE device=?`,
+    [bot.deviceNorm]
+  );
+
+  await tg(
+    bot.token,
+    chat,
+    "🛑 OTA cancelled
+" +
+    "📟 " + bot.device
   );
 
   continue;
@@ -769,7 +794,6 @@ setInterval(async () => {
 app.listen(PORT, "0.0.0.0", () => {
   console.log("🚀 Server running on port", PORT);
 });
-
 
 
 
