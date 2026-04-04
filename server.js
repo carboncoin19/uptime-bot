@@ -222,12 +222,16 @@ function buildSlaMessage({ title, device, status, label, uptimeMs }) {
 /* ===================== TELEGRAM HELPERS ===================== */
 async function tg(token, chat, text) {
   try {
-    await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+    const r = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ chat_id: chat, text }),
     });
-  } catch {}
+    const data = await r.json();
+    if (!data.ok) console.error(`❌ TG send failed chat=${chat}:`, data.description);
+  } catch (e) {
+    console.error(`❌ TG fetch error chat=${chat}:`, e.message);
+  }
 }
 
 async function broadcast(token, text) {
