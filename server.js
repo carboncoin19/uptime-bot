@@ -267,6 +267,16 @@ app.get("/__debug/devices", async (req, res) => {
   }
 });
 
+// ===================== CHATS DEBUG =====================
+app.get("/__debug/chats", async (req, res) => {
+  try {
+    const chats = await dbAll("SELECT * FROM chats");
+    res.json({ count: chats.length, chats });
+  } catch (e) {
+    res.status(500).json({ error: String(e) });
+  }
+});
+
 // ===================== TEMP DB DEBUG (REMOVE AFTER USE) =====================
 app.get("/__debug/db", async (req, res) => {
   try {
