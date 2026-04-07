@@ -17,7 +17,7 @@ const TZ_OFFSET_MS = 3600000; // Nigeria +1
 
 const DAY_MS = 86400000;
 const MIDNIGHT_CHECK_MS = 15000;
-const DEVICE_STALE_MS = 2 * 60 * 1000;
+const DEVICE_STALE_MS = 4 * 60 * 1000;
 
 /* ===================== MULTI BOT CONFIG ===================== */
 const BOTS = [];
@@ -52,7 +52,10 @@ const db = new sqlite3.Database(DB_FILE, err => {
   else console.log("✅ SQLite ready:", DB_FILE);
 });
 
-db.get("PRAGMA journal_mode=WAL;");
+db.run("PRAGMA journal_mode=WAL;", err => {
+  if (err) console.error("❌ WAL mode error:", err.message);
+  else console.log("✅ WAL mode enabled");
+});
 let firmwareSchemaReady = false;
 
 
@@ -75,38 +78,50 @@ db.serialize(() => {
 const has = name => cols.some(c => c.name === name);
 
 let pending = 0;
+let migrationError = false;
 
-if (!has("latest_version")) {
-  pending++;
-  db.run(
-    `ALTER TABLE firmware_control ADD COLUMN latest_version TEXT`,
-    () => { if (--pending === 0) firmwareSchemaReady = true; }
-  );
-}
+const migrationCallback = (err) => {
+    if (err) {
+      console.error("❌ firmware migration error:", err.message);
+      migrationError = true;
+    }
+    if (--pending === 0) {
+      if (!migrationError) firmwareSchemaReady = true;
+      else console.error("❌ firmwareSchemaReady NOT set — migration had errors");
+    }
+  };
 
-if (!has("firmware_url")) {
-  pending++;
-  db.run(
-    `ALTER TABLE firmware_control ADD COLUMN firmware_url TEXT`,
-    () => { if (--pending === 0) firmwareSchemaReady = true; }
-  );
-}
+  if (!has("latest_version")) {
+    pending++;
+    db.run(
+      `ALTER TABLE firmware_control ADD COLUMN latest_version TEXT`,
+      migrationCallback
+    );
+  }
 
-if (!has("current_version")) {
-  pending++;
-  db.run(
-    `ALTER TABLE firmware_control ADD COLUMN current_version TEXT`,
-    () => { if (--pending === 0) firmwareSchemaReady = true; }
-  );
-}
+  if (!has("firmware_url")) {
+    pending++;
+    db.run(
+      `ALTER TABLE firmware_control ADD COLUMN firmware_url TEXT`,
+      migrationCallback
+    );
+  }
 
-if (!has("force_update")) {
-  pending++;
-  db.run(
-    `ALTER TABLE firmware_control ADD COLUMN force_update INTEGER DEFAULT 0`,
-    () => { if (--pending === 0) firmwareSchemaReady = true; }
-  );
-}
+  if (!has("current_version")) {
+    pending++;
+    db.run(
+      `ALTER TABLE firmware_control ADD COLUMN current_version TEXT`,
+      migrationCallback
+    );
+  }
+
+  if (!has("force_update")) {
+    pending++;
+    db.run(
+      `ALTER TABLE firmware_control ADD COLUMN force_update INTEGER DEFAULT 0`,
+      migrationCallback
+    );
+  }
 
 // If nothing to migrate, mark ready immediately
 if (pending === 0) {
@@ -169,8 +184,33 @@ const dbRun = (s, p = []) =>
     })
   );
 
-const dbGet = (s, p = []) => new Promise(r => db.get(s, p, (_, row) => r(row || null)));
-const dbAll = (s, p = []) => new Promise(r => db.all(s, p, (_, rows) => r(rows || [])));
+const dbGet = (s, p = []) =>
+  new Promise((resolve, reject) =>
+    db.get(s, p, (err, row) => {
+      if (err) {
+        console.error("❌ SQL ERROR:", err.message, s);
+        reject(err);
+      } else {
+        resolve(row || null);
+      }
+    })
+  );
+
+const dbAll = (s, p = []) =>
+  new Promise((resolve, reject) =>
+    db.all(s, p, (err, rows) => {
+      if (err) {
+        console.error("❌ SQL ERROR:", err.message, s);
+        reject(err);
+      } else {
+        resolve(rows || []);
+      }
+    })
+  );
+
+function normalizeDevice(device) {
+  return String(device || "").trim().toUpperCase();
+}
 
 /* ===================== TIME HELPERS ===================== */
 function todayEpochSec() {
@@ -188,11 +228,11 @@ function monthStartEpochSec() {
 
 function epochSecToLabel(s) {
   return new Date(s * 1000 + TZ_OFFSET_MS)
-    .toLocaleDateString("en-US", { month: "short", day: "2-digit" });
+    .toLocaleDateString("en-US", { month: "short", day: "2-digit", timeZone: "UTC" });
 }
 
 function formatTime(ms) {
-  return new Date(ms + TZ_OFFSET_MS).toLocaleString();
+  return new Date(ms + TZ_OFFSET_MS).toLocaleString("en-US", { timeZone: "UTC" });
 }
 
 const slaPercent = up => Math.min(100, (up / DAY_MS) * 100);
@@ -239,11 +279,12 @@ async function broadcast(token, text) {
     `SELECT chat_id FROM chats WHERE bot_token=?`,
     [token]
   );
-  for (const c of chats) tg(token, c.chat_id, text);
+  await Promise.all(chats.map(c => tg(token, c.chat_id, text)));
 }
 
 /* ===================== EVENT API ===================== */
 
+if (process.env.DEBUG === "true") {
 
 // ===================== TEMP DEBUG: LIST ALL DEVICES =====================
 // REMOVE AFTER VERIFICATION
@@ -339,44 +380,36 @@ app.get("/__debug/fix-ota", async (req, res) => {
     res.status(500).json({ error: String(e) });
   }
 });
+}
 
 
-/* ===================== EVENT API ===================== */
 app.post("/api/event", async (req, res) => {
-  console.log("EVENT:", req.body);
-
   const { device, event, uptime_ms, day, month, time, version } = req.body;
+  if (event !== "HEARTBEAT") console.log("EVENT:", req.body);
   const now = Date.now();
-  const dev = String(device || "").trim().toUpperCase();
+  const dev = normalizeDevice(device);
 
-  if (!event) return res.json({ ok: true });
+  if (!event || !dev) return res.json({ ok: true });
 
-  // HEARTBEAT: still update last_seen so /status works
-  if (event === "HEARTBEAT") {
-    if (dev) {
-      
-    await dbRun(
-  `INSERT INTO devices(device,last_seen)
-   VALUES(?,?)
-   ON CONFLICT(device)
-   DO UPDATE SET last_seen=excluded.last_seen`,
-  [dev, now]
-);
+  try {
+    // HEARTBEAT: still update last_seen so /status works
+    if (event === "HEARTBEAT") {
+      await dbRun(
+        `INSERT INTO devices(device,last_seen)
+         VALUES(?,?)
+         ON CONFLICT(device)
+         DO UPDATE SET last_seen=excluded.last_seen`,
+        [dev, now]
+      );
+      await dbRun(
+        `INSERT INTO firmware_control(device)
+         VALUES(?)
+         ON CONFLICT(device) DO NOTHING`,
+        [dev]
+      );
+      return res.json({ ok: true });
+    }
 
-    // heartbeat only updates last_seen
-
-    // 🔧 ENSURE firmware_control row exists for this device
-    await dbRun(
-      `INSERT INTO firmware_control(device)
-       VALUES(?)
-       ON CONFLICT(device) DO NOTHING`,
-      [dev]
-    );
-  }
-    return res.json({ ok: true });
-  
-  }
-  if (dev) {
     const status =
       event === "ONLINE" || event === "OFFLINE" ? event : null;
 
@@ -384,84 +417,81 @@ app.post("/api/event", async (req, res) => {
       `INSERT INTO devices(device,last_seen,status)
        VALUES(?,?,?)
        ON CONFLICT(device)
-       DO UPDATE SET last_seen=excluded.last_seen`,
+       DO UPDATE SET last_seen=excluded.last_seen,
+                     status=COALESCE(excluded.status, devices.status)`,
       [dev, now, status]
     );
 
-    if (status)
+    if (event === "DAILY_SYNC")
       await dbRun(
-        `UPDATE devices SET status=? WHERE device=?`,
-        [status, dev]
+        `INSERT OR REPLACE INTO daily_uptime VALUES(?,?,?)`,
+        [dev, day, uptime_ms || 0]
       );
+
+    if (event === "MONTHLY_SYNC")
+      await dbRun(
+        `INSERT OR REPLACE INTO monthly_uptime VALUES(?,?,?)`,
+        [dev, month, uptime_ms || 0]
+      );
+
+    if (event === "ONLINE" || event === "OFFLINE") {
+      const msg =
+        `${event === "ONLINE" ? "🟢 ONLINE" : "🔴 OFFLINE"}\n` +
+        `${dev}\n🕒 ${time || formatTime(now)}`;
+
+      for (const bot of BOTS)
+        if (bot.deviceNorm === dev)
+          await broadcast(bot.token, msg);
+    }
+
+    if (event === "FW_REPORT") {
+      await dbRun(
+        `INSERT INTO firmware_control(device, current_version)
+         VALUES(?,?)
+         ON CONFLICT(device)
+         DO UPDATE SET current_version=excluded.current_version`,
+        [dev, version || "unknown"]
+      );
+    }
+
+    if (event === "OTA_SUCCESS") {
+      await dbRun(
+        `UPDATE firmware_control
+         SET update_requested=0,
+             force_update=0,
+             current_version=?
+         WHERE device=?`,
+        [version || "unknown", dev]
+      );
+
+      const msg =
+        `🚀 OTA UPDATE SUCCESS\n\n` +
+        `📟 ${dev}\n` +
+        `🆕 Version: ${version || "unknown"}\n` +
+        `🕒 ${time || formatTime(now)}`;
+
+      for (const bot of BOTS)
+        if (bot.deviceNorm === dev)
+          await broadcast(bot.token, msg);
+    }
+
+    if (event === "OTA_FAILED") {
+      const msg =
+        `❌ OTA UPDATE FAILED\n\n` +
+        `📟 ${dev}\n` +
+        `🆕 Version: ${version || "unknown"}\n` +
+        `🕒 ${time || formatTime(now)}`;
+
+      for (const bot of BOTS)
+        if (bot.deviceNorm === dev)
+          await broadcast(bot.token, msg);
+    }
+
+    res.json({ ok: true });
+  } catch (e) {
+    console.error("❌ /api/event error:", e.message);
+    res.status(500).json({ ok: false });
   }
-
-  if (event === "DAILY_SYNC")
-    await dbRun(
-      `INSERT OR REPLACE INTO daily_uptime VALUES(?,?,?)`,
-      [dev, day, uptime_ms || 0]
-    );
-
-  if (event === "MONTHLY_SYNC")
-    await dbRun(
-      `INSERT OR REPLACE INTO monthly_uptime VALUES(?,?,?)`,
-      [dev, month, uptime_ms || 0]
-    );
-
-  if (event === "ONLINE" || event === "OFFLINE") {
-    const msg =
-      `${event === "ONLINE" ? "🟢 ONLINE" : "🔴 OFFLINE"}\n` +
-      `${dev}\n🕒 ${time || formatTime(now)}`;
-
-    for (const bot of BOTS)
-      if (bot.deviceNorm === dev)
-        broadcast(bot.token, msg);
-  }
-
-  if (event === "FW_REPORT") {
-    // Persist firmware version (handle old DB schemas safely)
-    await dbRun(
-      `INSERT INTO firmware_control(device, current_version)
-       VALUES(?,?)
-       ON CONFLICT(device)
-       DO UPDATE SET current_version=excluded.current_version`,
-      [dev, version || "unknown"]
-    );
-  }
-
-  if (event === "OTA_SUCCESS") {
-    await dbRun(
-      `UPDATE firmware_control
-       SET update_requested=0,
-           force_update=0,
-           current_version=?
-       WHERE device=?`,
-      [version || "unknown", dev]
-    );
-
-    const msg =
-      `🚀 OTA UPDATE SUCCESS\n\n` +
-      `📟 ${dev}\n` +
-      `🆕 Version: ${version || "unknown"}\n` +
-      `🕒 ${time || formatTime(now)}`;
-
-    for (const bot of BOTS)
-      if (bot.deviceNorm === dev)
-        broadcast(bot.token, msg);
-  }
-
-  if (event === "OTA_FAILED") {
-    const msg =
-      `❌ OTA UPDATE FAILED\n\n` +
-      `📟 ${dev}\n` +
-      `🆕 Version: ${version || "unknown"}\n` +
-      `🕒 ${time || formatTime(now)}`;
-
-    for (const bot of BOTS)
-      if (bot.deviceNorm === dev)
-        broadcast(bot.token, msg);
-  }
-
-  res.json({ ok: true });
 });
 
 /* ===================== OTA CHECK API ===================== */
@@ -470,25 +500,30 @@ app.get("/api/fw/:device", async (req, res) => {
     return res.json({ update: false });
   const dev = req.params.device.trim().toUpperCase();
 
-  const row = await dbGet(
-    `SELECT latest_version, firmware_url,
-            update_requested, force_update
-     FROM firmware_control
-     WHERE device=?`,
-    [dev]
-  );
+  try {
+    const row = await dbGet(
+      `SELECT latest_version, firmware_url,
+              update_requested, force_update
+       FROM firmware_control
+       WHERE device=?`,
+      [dev]
+    );
 
-  if (!row || row.update_requested !== 1) {
-    return res.json({ update: false });
+    if (!row || row.update_requested !== 1) {
+      return res.json({ update: false });
+    }
+
+    res.json({
+      update: true,
+      version: row.latest_version,
+      url: row.firmware_url,
+      force: row.force_update === 1,
+      trigger: true
+    });
+  } catch (e) {
+    console.error("❌ /api/fw error:", e.message);
+    res.json({ update: false });
   }
-
-  res.json({
-    update: true,
-    version: row.latest_version,
-    url: row.firmware_url,
-    force: row.force_update === 1,
-    trigger: true
-  });
 });
 
 /* ===================== TELEGRAM UPDATE HANDLER ===================== */
@@ -498,67 +533,81 @@ async function handleUpdate(bot, update) {
 
   if (!chat || !cmd) return;
 
-  await dbRun(
-    `INSERT OR IGNORE INTO chats(chat_id,bot_token) VALUES(?,?)`,
-    [chat, bot.token]
-  );
+  try {
+    await dbRun(
+      `INSERT OR IGNORE INTO chats(chat_id,bot_token) VALUES(?,?)`,
+      [chat, bot.token]
+    );
+  } catch (e) {
+    console.error("❌ Chat registration error:", e.message);
+    // Continue processing the command even if registration fails
+  }
 
   if (cmd === "/start")
-    tg(bot.token, chat, `📡 ${bot.device} uptime monitor active.`);
+    await tg(bot.token, chat, `📡 ${bot.device} uptime monitor active.`);
 
-  if (cmd.startsWith("/update")) {
+  else if (cmd.startsWith("/update")) {
     console.log("TG /update received:", bot.deviceNorm, cmd);
+    try {
+      const parts = cmd.split(" ");
+      const newVersion = parts.slice(1).join(" ").trim();
 
-    const parts = cmd.split(" ");
-    const newVersion = parts.slice(1).join(" ").trim();
+      if (!newVersion) {
+        await tg(bot.token, chat, "❌ Invalid version.\nUsage: /update 1.0.5");
+        return;
+      }
 
-    if (!newVersion) {
-      await tg(bot.token, chat, "❌ Invalid version.\nUsage: /update 1.0.5");
-      return;
+      const fwUrl =
+        "https://github.com/carboncoin19/esp32-uptime-ota/releases/latest/download/firmware.bin";
+
+      await dbRun(
+        `INSERT INTO firmware_control
+         (device, latest_version, firmware_url, update_requested, force_update)
+         VALUES(?,?,?,?,?)
+         ON CONFLICT(device)
+         DO UPDATE SET
+           latest_version=excluded.latest_version,
+           firmware_url=excluded.firmware_url,
+           update_requested=1,
+           force_update=0`,
+        [bot.deviceNorm, newVersion, fwUrl, 1, 0]
+      );
+
+      await tg(
+        bot.token,
+        chat,
+        "🚀 Update requested\n" +
+        "📟 " + bot.device + "\n" +
+        "🆕 " + newVersion
+      );
+    } catch (e) {
+      console.error("/update error:", e);
+      await tg(bot.token, chat, "⚠️ Update request failed, please try again");
     }
-
-    const fwUrl =
-      "https://github.com/carboncoin19/esp32-uptime-ota/releases/latest/download/firmware.bin";
-
-    await dbRun(
-      `INSERT INTO firmware_control
-       (device, latest_version, firmware_url, update_requested, force_update)
-       VALUES(?,?,?,?,?)
-       ON CONFLICT(device)
-       DO UPDATE SET
-         latest_version=excluded.latest_version,
-         firmware_url=excluded.firmware_url,
-         update_requested=1,
-         force_update=0`,
-      [bot.deviceNorm, newVersion, fwUrl, 1, 0]
-    );
-
-    await tg(
-      bot.token,
-      chat,
-      "🚀 Update requested\n" +
-      "📟 " + bot.device + "\n" +
-      "🆕 " + newVersion
-    );
     return;
   }
 
-  if (cmd === "/fw") {
-    const row = await dbGet(
-      `SELECT current_version, latest_version FROM firmware_control WHERE device=?`,
-      [bot.device.toUpperCase()]
-    );
+  else if (cmd === "/fw") {
+    try {
+      const row = await dbGet(
+        `SELECT current_version, latest_version FROM firmware_control WHERE device=?`,
+        [bot.deviceNorm]
+      );
 
-    tg(
-      bot.token,
-      chat,
-      "📟 " + bot.device + "\n" +
-      "Current Device Version: " + (row?.current_version || "Unknown") + "\n" +
-      "Latest Server Version: " + (row?.latest_version || "Not set")
-    );
+      await tg(
+        bot.token,
+        chat,
+        "📟 " + bot.device + "\n" +
+        "Current Device Version: " + (row?.current_version || "Unknown") + "\n" +
+        "Latest Server Version: " + (row?.latest_version || "Not set")
+      );
+    } catch (e) {
+      console.error("/fw error:", e);
+      await tg(bot.token, chat, "⚠️ Firmware info unavailable, please try again");
+    }
   }
 
-  if (cmd === "/status") {
+  else if (cmd === "/status") {
     try {
       const today = todayEpochSec();
       const yLabel = epochSecToLabel(today - 86400);
@@ -602,7 +651,7 @@ async function handleUpdate(bot, update) {
     }
   }
 
-  if (cmd === "/statusweek") {
+  else if (cmd === "/statusweek") {
     try {
       const rows = await dbAll(
         `SELECT day, uptime_ms
@@ -647,7 +696,7 @@ async function handleUpdate(bot, update) {
     }
   }
 
-  if (cmd === "/statusmonth") {
+  else if (cmd === "/statusmonth") {
     try {
       const rows = await dbAll(
         `SELECT day, uptime_ms
@@ -690,7 +739,11 @@ app.post("/webhook/:token", async (req, res) => {
   res.sendStatus(200);
   const bot = BOTS.find(b => b.token === req.params.token);
   if (!bot) return;
-  await handleUpdate(bot, req.body);
+  try {
+    await handleUpdate(bot, req.body);
+  } catch (e) {
+    console.error("❌ Webhook handler error:", e.message);
+  }
 });
 
 /* ===================== TELEGRAM WEBHOOK REGISTRATION ===================== */
@@ -711,44 +764,64 @@ async function registerWebhook(bot) {
 }
 
 /* ===================== DAILY SLA BROADCAST ===================== */
-let sent = {};
+const sent = {};
 
 setInterval(async () => {
-  const now = new Date(Date.now() + TZ_OFFSET_MS);
-  const secondsToday = now.getHours() * 3600 + now.getMinutes() * 60;
+  try {
+    const now = new Date(Date.now() + TZ_OFFSET_MS);
+    const secondsToday = now.getHours() * 3600 + now.getMinutes() * 60;
 
-  if (secondsToday < 25200 || secondsToday > 25800) return;
+    if (secondsToday < 25200 || secondsToday > 25800) return;
 
-  for (const bot of BOTS) {
-    const yLabel = epochSecToLabel(todayEpochSec() - 86400);
-    if (sent[bot.device] === yLabel) continue;
+    for (const bot of BOTS) {
+      try {
+        const yLabel = epochSecToLabel(todayEpochSec() - 86400);
+        if (sent[bot.device] === yLabel) continue;
 
-    const rows = await dbAll(
-      `SELECT day,uptime_ms FROM daily_uptime
-       WHERE device=? ORDER BY day DESC LIMIT 7`,
-      [bot.device]
-    );
+        const rows = await dbAll(
+          `SELECT day,uptime_ms FROM daily_uptime
+           WHERE device=? ORDER BY day DESC LIMIT 7`,
+          [bot.deviceNorm]
+        );
 
-    const match = rows.find(r => epochSecToLabel(r.day) === yLabel);
-    if (!match) continue;
+        const match = rows.find(r => epochSecToLabel(r.day) === yLabel);
+        if (!match) {
+          await broadcast(
+            bot.token,
+            `⚠️ No DAILY_SYNC received for ${yLabel}\n📟 ${bot.device}\nDevice may have been offline or disconnected all day.`
+          );
+          sent[bot.device] = yLabel;
+          continue;
+        }
 
-    const devRow = await dbGet(
-      `SELECT last_seen,status FROM devices WHERE device=?`,
-      [bot.device]
-    );
+        const devRow = await dbGet(
+          `SELECT last_seen,status FROM devices WHERE device=?`,
+          [bot.deviceNorm]
+        );
 
-    broadcast(
-      bot.token,
-      buildSlaMessage({
-        title: "Yesterday SLA (24h)",
-        device: bot.device,
-        status: computeLiveStatus(devRow),
-        label: yLabel,
-        uptimeMs: match.uptime_ms,
-      })
-    );
+        await broadcast(
+          bot.token,
+          buildSlaMessage({
+            title: "Yesterday SLA (24h)",
+            device: bot.device,
+            status: computeLiveStatus(devRow),
+            label: yLabel,
+            uptimeMs: match.uptime_ms,
+          })
+        );
 
-    sent[bot.device] = yLabel;
+        sent[bot.device] = yLabel;
+      } catch (e) {
+        console.error(`❌ SLA broadcast error for ${bot.device}:`, e.message);
+      }
+    }
+
+    // clean up sent entries older than today to prevent unbounded growth
+    for (const key of Object.keys(sent)) {
+      if (sent[key] !== epochSecToLabel(todayEpochSec() - 86400)) delete sent[key];
+    }
+  } catch (e) {
+    console.error("❌ SLA broadcast error:", e.message);
   }
 }, MIDNIGHT_CHECK_MS);
 
