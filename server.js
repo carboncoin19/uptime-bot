@@ -452,6 +452,18 @@ app.post("/api/event", async (req, res) => {
          DO UPDATE SET current_version=excluded.current_version`,
         [dev, version || "unknown"]
       );
+      // Auto-clear stuck update_requested if device already has the target version
+      const fwRow = await dbGet(
+        `SELECT latest_version, update_requested FROM firmware_control WHERE device=?`,
+        [dev]
+      );
+      if (fwRow && fwRow.update_requested === 1 && fwRow.latest_version === version) {
+        await dbRun(
+          `UPDATE firmware_control SET update_requested=0, force_update=0 WHERE device=?`,
+          [dev]
+        );
+        console.log(`[FW_REPORT] Auto-cleared stuck update_requested for ${dev} (version match: ${version})`);
+      }
     }
 
     if (event === "OTA_SUCCESS") {
@@ -583,6 +595,67 @@ async function handleUpdate(bot, update) {
     } catch (e) {
       console.error("/update error:", e);
       await tg(bot.token, chat, "⚠️ Update request failed, please try again");
+    }
+    return;
+  }
+
+  else if (cmd.startsWith("/forceupdate")) {
+    try {
+      const parts = cmd.split(" ");
+      const newVersion = parts.slice(1).join(" ").trim();
+
+      if (!newVersion) {
+        await tg(bot.token, chat, "❌ Invalid version.\nUsage: /forceupdate 1.0.5");
+        return;
+      }
+
+      const fwUrl =
+        "https://github.com/carboncoin19/esp32-uptime-ota/releases/latest/download/firmware.bin";
+
+      await dbRun(
+        `INSERT INTO firmware_control
+         (device, latest_version, firmware_url, update_requested, force_update)
+         VALUES(?,?,?,?,?)
+         ON CONFLICT(device)
+         DO UPDATE SET
+           latest_version=excluded.latest_version,
+           firmware_url=excluded.firmware_url,
+           update_requested=1,
+           force_update=1`,
+        [bot.deviceNorm, newVersion, fwUrl, 1, 1]
+      );
+
+      await tg(
+        bot.token,
+        chat,
+        "🚀 Force update requested\n" +
+        "📟 " + bot.device + "\n" +
+        "🆕 " + newVersion + "\n" +
+        "⚠️ Will flash even if version matches"
+      );
+    } catch (e) {
+      console.error("/forceupdate error:", e);
+      await tg(bot.token, chat, "⚠️ Force update request failed, please try again");
+    }
+    return;
+  }
+
+  else if (cmd === "/stopupdate") {
+    try {
+      await dbRun(
+        `UPDATE firmware_control SET update_requested=0, force_update=0 WHERE device=?`,
+        [bot.deviceNorm]
+      );
+      await tg(
+        bot.token,
+        chat,
+        "🛑 OTA update cancelled\n" +
+        "📟 " + bot.device + "\n" +
+        "Device will no longer receive the pending update"
+      );
+    } catch (e) {
+      console.error("/stopupdate error:", e);
+      await tg(bot.token, chat, "⚠️ Stop update failed, please try again");
     }
     return;
   }
