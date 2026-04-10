@@ -19,21 +19,29 @@ const DAY_MS = 86400000;
 const MIDNIGHT_CHECK_MS = 15000;
 const DEVICE_STALE_MS = 4 * 60 * 1000;
 
+/* ===================== FIRMWARE URL MAP ===================== */
+const FW_URLS = {
+  esp32:   "https://github.com/carboncoin19/esp32-uptime-ota/releases/latest/download/firmware-esp32.bin",
+  esp32c3: "https://github.com/carboncoin19/esp32-uptime-ota/releases/latest/download/firmware-esp32c3.bin",
+};
+
 /* ===================== MULTI BOT CONFIG ===================== */
 const BOTS = [];
 for (let i = 1; i <= 10; i++) {
-  const token = process.env[`TG_BOT_TOKEN_${i}`];
+  const token  = process.env[`TG_BOT_TOKEN_${i}`];
   const device = process.env[`TG_BOT_DEVICE_${i}`];
+  const board  = (process.env[`TG_BOT_BOARD_${i}`] || "esp32").toLowerCase().replaceAll("-", "");
   if (token && device) {
     BOTS.push({
       token,
       device: device.trim(),
       deviceNorm: device.trim().toUpperCase(),
-      lastId: 0,
+      board,
+      fwUrl: FW_URLS[board] || FW_URLS.esp32,
     });
   }
 }
-console.log("🤖 Bots loaded:", BOTS.map(b => b.device));
+console.log("🤖 Bots loaded:", BOTS.map(b => `${b.device} (${b.board})`));
 
 /* ===================== FILESYSTEM ===================== */
 if (!fs.existsSync("/data")) fs.mkdirSync("/data", { recursive: true });
@@ -215,13 +223,6 @@ function normalizeDevice(device) {
 /* ===================== TIME HELPERS ===================== */
 function todayEpochSec() {
   const d = new Date(Date.now() + TZ_OFFSET_MS);
-  d.setHours(0, 0, 0, 0);
-  return Math.floor(d.getTime() / 1000);
-}
-
-function monthStartEpochSec() {
-  const d = new Date(Date.now() + TZ_OFFSET_MS);
-  d.setDate(1);
   d.setHours(0, 0, 0, 0);
   return Math.floor(d.getTime() / 1000);
 }
@@ -521,7 +522,7 @@ app.get("/api/fw/:device", async (req, res) => {
       [dev]
     );
 
-    if (!row || row.update_requested !== 1) {
+    if (!row || row.update_requested !== 1 || !row.latest_version || !row.firmware_url) {
       return res.json({ update: false });
     }
 
@@ -555,22 +556,23 @@ async function handleUpdate(bot, update) {
     // Continue processing the command even if registration fails
   }
 
-  if (cmd === "/start")
+  if (cmd === "/start") {
     await tg(bot.token, chat, `📡 ${bot.device} uptime monitor active.`);
+    return;
+  }
 
   else if (cmd.startsWith("/update")) {
     console.log("TG /update received:", bot.deviceNorm, cmd);
     try {
       const parts = cmd.split(" ");
-      const newVersion = parts.slice(1).join(" ").trim();
+      const newVersion = parts[1]?.trim();
 
       if (!newVersion) {
-        await tg(bot.token, chat, "❌ Invalid version.\nUsage: /update 1.0.5");
+        await tg(bot.token, chat,
+          "❌ Invalid version.\nUsage: /update 1.0.5"
+        );
         return;
       }
-
-      const fwUrl =
-        "https://github.com/carboncoin19/esp32-uptime-ota/releases/latest/download/firmware.bin";
 
       await dbRun(
         `INSERT INTO firmware_control
@@ -582,7 +584,7 @@ async function handleUpdate(bot, update) {
            firmware_url=excluded.firmware_url,
            update_requested=1,
            force_update=0`,
-        [bot.deviceNorm, newVersion, fwUrl, 1, 0]
+        [bot.deviceNorm, newVersion, bot.fwUrl, 1, 0]
       );
 
       await tg(
@@ -590,7 +592,8 @@ async function handleUpdate(bot, update) {
         chat,
         "🚀 Update requested\n" +
         "📟 " + bot.device + "\n" +
-        "🆕 " + newVersion
+        "🆕 " + newVersion + "\n" +
+        "🔧 Board: " + bot.board
       );
     } catch (e) {
       console.error("/update error:", e);
@@ -602,15 +605,14 @@ async function handleUpdate(bot, update) {
   else if (cmd.startsWith("/forceupdate")) {
     try {
       const parts = cmd.split(" ");
-      const newVersion = parts.slice(1).join(" ").trim();
+      const newVersion = parts[1]?.trim();
 
       if (!newVersion) {
-        await tg(bot.token, chat, "❌ Invalid version.\nUsage: /forceupdate 1.0.5");
+        await tg(bot.token, chat,
+          "❌ Invalid version.\nUsage: /forceupdate 1.0.5"
+        );
         return;
       }
-
-      const fwUrl =
-        "https://github.com/carboncoin19/esp32-uptime-ota/releases/latest/download/firmware.bin";
 
       await dbRun(
         `INSERT INTO firmware_control
@@ -622,7 +624,7 @@ async function handleUpdate(bot, update) {
            firmware_url=excluded.firmware_url,
            update_requested=1,
            force_update=1`,
-        [bot.deviceNorm, newVersion, fwUrl, 1, 1]
+        [bot.deviceNorm, newVersion, bot.fwUrl, 1, 1]
       );
 
       await tg(
@@ -631,6 +633,7 @@ async function handleUpdate(bot, update) {
         "🚀 Force update requested\n" +
         "📟 " + bot.device + "\n" +
         "🆕 " + newVersion + "\n" +
+        "🔧 Board: " + bot.board + "\n" +
         "⚠️ Will flash even if version matches"
       );
     } catch (e) {
@@ -820,7 +823,7 @@ app.post("/webhook/:token", async (req, res) => {
 });
 
 /* ===================== TELEGRAM WEBHOOK REGISTRATION ===================== */
-async function registerWebhook(bot) {
+async function registerWebhook(bot, attempt = 1) {
   const baseUrl = process.env.SERVER_BASE_URL || "https://uptime-bot-production-9a37.up.railway.app";
   const webhookUrl = `${baseUrl}/webhook/${bot.token}`;
   try {
@@ -830,9 +833,21 @@ async function registerWebhook(bot) {
       body: JSON.stringify({ url: webhookUrl }),
     });
     const data = await res.json();
-    console.log(`🔗 Webhook for ${bot.device}:`, data.ok ? "✅ OK" : `❌ ${data.description}`);
+    if (data.ok) {
+      console.log(`🔗 Webhook for ${bot.device}: ✅ OK`);
+    } else {
+      console.error(`❌ Webhook for ${bot.device}: ${data.description}`);
+      if (attempt < 3) {
+        console.log(`↩️ Retrying webhook for ${bot.device} in 30s (attempt ${attempt}/3)`);
+        setTimeout(() => registerWebhook(bot, attempt + 1), 30000);
+      }
+    }
   } catch (e) {
     console.error(`❌ Webhook registration failed for ${bot.device}:`, e.message);
+    if (attempt < 3) {
+      console.log(`↩️ Retrying webhook for ${bot.device} in 30s (attempt ${attempt}/3)`);
+      setTimeout(() => registerWebhook(bot, attempt + 1), 30000);
+    }
   }
 }
 
@@ -842,7 +857,7 @@ const sent = {};
 setInterval(async () => {
   try {
     const now = new Date(Date.now() + TZ_OFFSET_MS);
-    const secondsToday = now.getHours() * 3600 + now.getMinutes() * 60;
+    const secondsToday = now.getHours() * 3600 + now.getMinutes() * 60 + now.getSeconds();
 
     if (secondsToday < 25200 || secondsToday > 25800) return;
 
