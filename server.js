@@ -174,7 +174,15 @@ db.all(`PRAGMA table_info(devices)`, (err, cols) => {
   if (!hasCol("wifi_ip"))
     db.run(`ALTER TABLE devices ADD COLUMN wifi_ip TEXT`);
   if (!hasCol("last_broadcast"))
-    db.run(`ALTER TABLE devices ADD COLUMN last_broadcast TEXT`);
+    db.run(`ALTER TABLE devices ADD COLUMN last_broadcast TEXT`, err => {
+      if (err) console.error("❌ devices migration error (last_broadcast):", err.message);
+      else console.log("✅ devices: last_broadcast column added");
+    });
+  if (!hasCol("site_status"))
+    db.run(`ALTER TABLE devices ADD COLUMN site_status INTEGER`, err => {
+      if (err) console.error("❌ devices migration error (site_status):", err.message);
+      else console.log("✅ devices: site_status column added");
+    });
 });
 
 db.run(`
@@ -270,18 +278,33 @@ const bar = p =>
   "█".repeat(Math.round((p / 100) * 10)) +
   "░".repeat(10 - Math.round((p / 100) * 10));
 
-function computeLiveStatus(d) {
-  if (!d?.last_seen) return "UNKNOWN";
-  if (Date.now() - d.last_seen > DEVICE_STALE_MS) return "UNKNOWN";
-  return d.status || "UNKNOWN";
+function lastSeenAgo(ts) {
+  if (!ts) return "never";
+  const s = Math.floor((Date.now() - ts) / 1000);
+  if (s < 60) return `${s}s ago`;
+  if (s < 3600) return `${Math.floor(s / 60)}m ago`;
+  return `${Math.floor(s / 3600)}h ago`;
 }
 
-function buildSlaMessage({ title, device, status, label, uptimeMs }) {
+function formatSiteStatus(devRow) {
+  const stale = !devRow?.last_seen || Date.now() - devRow.last_seen > DEVICE_STALE_MS;
+  if (stale) {
+    const label = devRow?.site_status === 1 ? "ONLINE" : devRow?.site_status === 0 ? "OFFLINE" : "UNKNOWN";
+    return `${label} ⚠️ (last known — device unreachable)`;
+  }
+  if (devRow.site_status === 1) return "ONLINE ✅";
+  if (devRow.site_status === 0) return "OFFLINE ❌";
+  return "UNKNOWN ⚠️";
+}
+
+
+function buildSlaMessage({ title, device, devRow, label, uptimeMs }) {
   const p = slaPercent(uptimeMs);
   return (
     `📊 ${title}\n` +
-    `📟 ${device}\n` +
-    `📡 Status: ${status}\n` +
+    `📟 ${device}\n\n` +
+    `🌐 Site: ${formatSiteStatus(devRow)}\n` +
+    `(Device last seen: ${lastSeenAgo(devRow?.last_seen)})\n` +
     `📅 ${label}\n\n` +
     `SLA: ${p.toFixed(2)}%\n` +
     `Uptime: ${(uptimeMs / 3600000).toFixed(2)}h\n` +
@@ -425,16 +448,17 @@ app.post("/api/event", async (req, res) => {
     // HEARTBEAT: update last_seen and return OTA + reset_config status inline
     // Device reads this response — eliminates a separate GET /api/fw round trip
     if (event === "HEARTBEAT") {
-      const { ssid, ip } = req.body;
+      const { ssid, ip, site } = req.body;
       await dbRun(
-        `INSERT INTO devices(device,last_seen,status,wifi_ssid,wifi_ip)
-         VALUES(?,?,'ONLINE',?,?)
+        `INSERT INTO devices(device,last_seen,status,wifi_ssid,wifi_ip,site_status)
+         VALUES(?,?,'ONLINE',?,?,?)
          ON CONFLICT(device)
          DO UPDATE SET last_seen=excluded.last_seen,
                        status='ONLINE',
                        wifi_ssid=COALESCE(excluded.wifi_ssid, devices.wifi_ssid),
-                       wifi_ip=COALESCE(excluded.wifi_ip, devices.wifi_ip)`,
-        [dev, now, ssid || null, ip || null]
+                       wifi_ip=COALESCE(excluded.wifi_ip, devices.wifi_ip),
+                       site_status=COALESCE(excluded.site_status, devices.site_status)`,
+        [dev, now, ssid || null, ip || null, site !== undefined ? site : null]
       );
       await dbRun(
         `INSERT INTO firmware_control(device)
@@ -468,13 +492,17 @@ app.post("/api/event", async (req, res) => {
     const status =
       event === "ONLINE" || event === "OFFLINE" ? event : null;
 
+    const pinSite =
+      event === "ONLINE" ? 1 : event === "OFFLINE" ? 0 : null;
+
     await dbRun(
-      `INSERT INTO devices(device,last_seen,status)
-       VALUES(?,?,?)
+      `INSERT INTO devices(device,last_seen,status,site_status)
+       VALUES(?,?,?,?)
        ON CONFLICT(device)
        DO UPDATE SET last_seen=excluded.last_seen,
-                     status=COALESCE(excluded.status, devices.status)`,
-      [dev, now, status]
+                     status=COALESCE(excluded.status, devices.status),
+                     site_status=COALESCE(excluded.site_status, devices.site_status)`,
+      [dev, now, status, pinSite]
     );
 
     if (event === "DAILY_SYNC")
@@ -621,42 +649,6 @@ app.post("/api/event", async (req, res) => {
   }
 });
 
-/* ===================== OTA CHECK API ===================== */
-app.get("/api/fw/:device", async (req, res) => {
-  if (!firmwareSchemaReady)
-    return res.json({ update: false });
-  const dev = req.params.device.trim().toUpperCase();
-
-  try {
-    const row = await dbGet(
-      `SELECT latest_version, firmware_url,
-              update_requested, force_update, reset_config
-       FROM firmware_control
-       WHERE device=?`,
-      [dev]
-    );
-
-    // Send reset_config flag if set — do NOT clear here, only clear on WIFI_RESET confirmation
-    const resetConfig = row?.reset_config === 1;
-
-    if (!row || row.update_requested !== 1 || !row.latest_version || !row.firmware_url) {
-      return res.json({ update: false, reset_config: resetConfig });
-    }
-
-    res.json({
-      update: true,
-      version: row.latest_version,
-      url: row.firmware_url,
-      force: row.force_update === 1,
-      reset_config: resetConfig,
-      trigger: true
-    });
-  } catch (e) {
-    console.error("❌ /api/fw error:", e.message);
-    res.json({ update: false });
-  }
-});
-
 /* ===================== DEVICE CONFIG API ===================== */
 app.get("/api/config/:device", async (req, res) => {
   const dev = req.params.device.trim().toUpperCase();
@@ -795,24 +787,25 @@ async function handleUpdate(bot, update) {
   else if (cmd.startsWith("/setwifi")) {
     try {
       // Parse: /setwifi <ssid1> <pass1> <ssid2> <pass2>
-      // pass1, ssid2, pass2 are single tokens (no spaces).
-      // ssid1 may contain spaces — everything between /setwifi and the last 3 tokens.
+      // Use ! as space substitute in ssid1 and ssid2 only.
+      // pass1, ssid2, pass2 are single tokens. ssid1 may span multiple tokens.
       const tokens = cmd.trim().split(/\s+/);
-      // tokens[0] = "/setwifi", need at least 5 tokens total
-      // IMPORTANT: only ssid1 may contain spaces — ssid2, pass1, pass2 must be single words
       const USAGE =
         "❌ Usage: /setwifi <ssid1> <pass1> <ssid2> <pass2>\n" +
-        "Only ssid1 may contain spaces. ssid2, pass1, pass2 must be single words.\n" +
-        "Example (ssid1 has space): /setwifi Star Home 12345678 mifi 12345678\n" +
-        "Example (no spaces):       /setwifi mifi 12345678 Starlink abc123";
+        "Use ! in ssid1 and ssid2 where there is a space.\n" +
+        "Example: /setwifi Star!Home 12345678 My!Network abc123\n" +
+        "Example (no spaces): /setwifi mifi 12345678 Starlink abc123";
       if (tokens.length < 5) {
         await tg(bot.token, chat, USAGE);
         return;
       }
       const pass2 = tokens[tokens.length - 1];
-      const ssid2 = tokens[tokens.length - 2];
+      const ssid2Raw = tokens[tokens.length - 2];
       const pass1 = tokens[tokens.length - 3];
-      const ssid1 = tokens.slice(1, tokens.length - 3).join(" ");
+      const ssid1Raw = tokens.slice(1, tokens.length - 3).join(" ");
+      // Replace ! with space in SSIDs only
+      const ssid1 = ssid1Raw.replaceAll("!", " ");
+      const ssid2 = ssid2Raw.replaceAll("!", " ");
       // Guard: ssid1 must not be empty after parsing
       if (!ssid1.trim()) {
         await tg(bot.token, chat, USAGE);
@@ -978,7 +971,7 @@ async function handleUpdate(bot, update) {
       const match = rows.find(r => epochSecToLabel(r.day) === yLabel);
 
       const devRow = await dbGet(
-        `SELECT last_seen,status FROM devices WHERE device=?`,
+        `SELECT last_seen, status, site_status FROM devices WHERE device=?`,
         [bot.deviceNorm]
       );
 
@@ -986,9 +979,10 @@ async function handleUpdate(bot, update) {
         await tg(
           bot.token,
           chat,
-          "⚠️ No DAILY_SYNC for yesterday\n" +
-          "📟 " + bot.device + "\n" +
-          "📡 Status: " + computeLiveStatus(devRow)
+          "📟 " + bot.device + "\n\n" +
+          "🌐 Site: " + formatSiteStatus(devRow) + "\n" +
+          "(Device last seen: " + lastSeenAgo(devRow?.last_seen) + ")\n\n" +
+          "⚠️ No DAILY_SYNC for yesterday"
         );
       } else {
         await tg(
@@ -997,7 +991,7 @@ async function handleUpdate(bot, update) {
           buildSlaMessage({
             title: "Yesterday SLA (24h)",
             device: bot.device,
-            status: computeLiveStatus(devRow),
+            devRow,
             label: yLabel,
             uptimeMs: match.uptime_ms,
           })
@@ -1151,8 +1145,11 @@ setInterval(async () => {
     for (const bot of BOTS) {
       try {
         const yLabel = epochSecToLabel(todayEpochSec() - 86400);
-        const broadcastRow = await dbGet(`SELECT last_broadcast FROM devices WHERE device=?`, [bot.deviceNorm]);
-        if (broadcastRow?.last_broadcast === yLabel) continue;
+        const devRow = await dbGet(
+          `SELECT last_seen, status, site_status, last_broadcast FROM devices WHERE device=?`,
+          [bot.deviceNorm]
+        );
+        if (devRow?.last_broadcast === yLabel) continue;
 
         const rows = await dbAll(
           `SELECT day,uptime_ms FROM daily_uptime
@@ -1170,17 +1167,12 @@ setInterval(async () => {
           continue;
         }
 
-        const statusRow = await dbGet(
-          `SELECT last_seen,status FROM devices WHERE device=?`,
-          [bot.deviceNorm]
-        );
-
         await broadcast(
           bot.token,
           buildSlaMessage({
             title: "Yesterday SLA (24h)",
             device: bot.device,
-            status: computeLiveStatus(statusRow),
+            devRow,
             label: yLabel,
             uptimeMs: match.uptime_ms,
           })
